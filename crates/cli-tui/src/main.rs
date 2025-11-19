@@ -35,7 +35,9 @@ fn estimate_space_savings_gb(job: &Job) -> Option<f64> {
     }
     
     // Require all metadata for proper estimation - no lazy fallbacks
-    let (width, height, bitrate_bps, codec, frame_rate_str) = (
+    // We validate these are present even if not directly used in calculation
+    // (they ensure we have complete video metadata)
+    let (_width, _height, bitrate_bps, codec, frame_rate_str) = (
         job.video_width?,
         job.video_height?,
         job.video_bitrate?,
@@ -43,8 +45,9 @@ fn estimate_space_savings_gb(job: &Job) -> Option<f64> {
         job.video_frame_rate.as_deref()?,
     );
     
-    // Parse frame rate (format: "30/1" or "29.97")
-    let fps = parse_frame_rate(frame_rate_str)?;
+    // Parse frame rate to validate it's valid (format: "30/1" or "29.97")
+    // We require it to be present and parseable, even if not used in calculation
+    let _fps = parse_frame_rate(frame_rate_str)?;
     
     // Adjust based on source codec efficiency
     // AV1 efficiency vs source codec (bitrate reduction factor)
