@@ -81,16 +81,15 @@ fn main() -> Result<()> {
     let args = Args::parse();
     
     // Load config - if no config specified, try default location first (same as daemon)
-    let config_path = if args.config.is_some() {
-        args.config.as_deref()
+    // Store default path in a variable that lives long enough
+    let default_config_path = PathBuf::from("/etc/av1d/config.json");
+    
+    let config_path = if let Some(ref path) = args.config {
+        Some(path.as_path())
+    } else if default_config_path.exists() {
+        Some(default_config_path.as_path())
     } else {
-        // Try default config location first
-        let default_path = PathBuf::from("/etc/av1d/config.json");
-        if default_path.exists() {
-            Some(default_path.as_path())
-        } else {
-            None
-        }
+        None
     };
     
     let cfg = TranscodeConfig::load_config(config_path)
