@@ -41,17 +41,34 @@ impl App {
         // Method 1: Try reading from sysfs paths
         let mut paths = Vec::new();
         
-        // Try card0 through card3, and gt0 through gt3
-        for card_num in 0..4 {
+        // Try to extract card number from gpu_device_path if it's a render node
+        // e.g., /dev/dri/renderD128 -> card0, /dev/dri/renderD129 -> card1
+        let mut card_nums = vec![0, 1, 2, 3]; // Default to try all
+        
+        if let Some(render_name) = self.gpu_device_path.file_name().and_then(|n| n.to_str()) {
+            // renderD128 -> card0, renderD129 -> card1, etc.
+            if render_name.starts_with("renderD") {
+                if let Ok(render_num) = render_name[7..].parse::<u32>() {
+                    // renderD128 is typically card0, renderD129 is card1
+                    let card_num = (render_num - 128) as usize;
+                    if card_num < 4 {
+                        card_nums.insert(0, card_num); // Try this card first
+                    }
+                }
+            }
+        }
+        
+        // Try card numbers, prioritizing the one from gpu_device_path
+        for &card_num in &card_nums {
             for gt_num in 0..4 {
                 paths.push(format!("/sys/class/drm/card{}/gt{}/busy", card_num, gt_num));
             }
             // Also try without gt subdirectory
             paths.push(format!("/sys/class/drm/card{}/gt/busy", card_num));
+            paths.push(format!("/sys/class/drm/card{}/device/gpu_busy_percent", card_num));
         }
         
-        // Try other common paths
-        paths.push("/sys/class/drm/card0/device/gpu_busy_percent".to_string());
+        // Try debug paths
         paths.push("/sys/kernel/debug/dri/0/i915_frequency_info".to_string());
         
         for path_str in paths {
