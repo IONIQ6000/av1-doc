@@ -160,19 +160,36 @@ fn ui(f: &mut Frame, app: &mut App) {
     }
     
     // Create vertical layout with explicit constraints
+    // Use exact calculations to prevent overlap
+    let top_height = 3;
+    let bottom_height = 3;
+    let available_height = size.height.saturating_sub(top_height + bottom_height);
+    
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Top bar: CPU/Memory (exactly 3 lines)
-            Constraint::Min(5),     // Middle: Job table (at least 5 lines, rest of space)
-            Constraint::Length(3),  // Bottom: Status bar (exactly 3 lines)
+            Constraint::Length(top_height),      // Top bar: CPU/Memory (exactly 3 lines)
+            Constraint::Length(available_height), // Middle: Job table (exact remaining space)
+            Constraint::Length(bottom_height),    // Bottom: Status bar (exactly 3 lines)
         ])
         .split(size);
     
-    // Render each section in its allocated area
-    render_top_bar(f, app, main_chunks[0]);
-    render_job_table(f, app, main_chunks[1]);
-    render_status_bar(f, app, main_chunks[2]);
+    // Verify chunks don't overlap
+    if main_chunks.len() >= 3 {
+        // Render each section in its allocated area - ensure we don't exceed bounds
+        if main_chunks[0].y + main_chunks[0].height <= size.height {
+            render_top_bar(f, app, main_chunks[0]);
+        }
+        
+        if main_chunks[1].y >= main_chunks[0].y + main_chunks[0].height && 
+           main_chunks[1].y + main_chunks[1].height <= main_chunks[2].y {
+            render_job_table(f, app, main_chunks[1]);
+        }
+        
+        if main_chunks[2].y >= main_chunks[1].y + main_chunks[1].height {
+            render_status_bar(f, app, main_chunks[2]);
+        }
+    }
 }
 
 fn render_top_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -232,9 +249,15 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     
-    // Calculate available rows: area.height - 2 (for header and borders)
+    // Calculate available rows: area.height - 2 (for header row and borders)
+    // Table block has top border (1) + header (1) + bottom border (1) = 3 lines minimum
+    // So data rows = area.height - 3 (for borders and header)
     let available_height = area.height as usize;
-    let max_data_rows = available_height.saturating_sub(2); // Subtract header and bottom border
+    let max_data_rows = if available_height > 3 {
+        available_height.saturating_sub(3) // Subtract top border, header, and bottom border
+    } else {
+        0
+    };
     
     let header = Row::new(vec![
         "STATUS",
