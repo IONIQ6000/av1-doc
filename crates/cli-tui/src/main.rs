@@ -44,7 +44,9 @@ impl App {
         for card_num in 0..4 {
             let driver_link = format!("/sys/class/drm/card{}/device/driver", card_num);
             if let Ok(link) = std::fs::read_link(&driver_link) {
-                if let Some(driver_name) = link.file_name().and_then(|n| n.to_str()) {
+                // The symlink points to something like ../../../../../../bus/pci/drivers/i915
+                // Extract the driver name from the path
+                if let Some(driver_name) = link.iter().last().and_then(|p| p.to_str()) {
                     if driver_name == "i915" {
                         intel_card_num = Some(card_num);
                         break;
