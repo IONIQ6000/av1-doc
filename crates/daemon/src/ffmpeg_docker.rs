@@ -39,9 +39,12 @@ pub async fn run_av1_vaapi_job(
     let container_output = format!("/config/{}", output_basename);
 
     // Build docker command base
+    // Note: Using --security-opt seccomp=unconfined to avoid sysctl permission issues in LXC
     let mut cmd = Command::new(&cfg.docker_bin);
     cmd.arg("run")
         .arg("--rm")
+        .arg("--security-opt")
+        .arg("seccomp=unconfined")
         .arg("--device")
         .arg(format!("{}:{}", cfg.gpu_device.display(), cfg.gpu_device.display()))
         .arg("-v")
