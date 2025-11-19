@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use chrono::Utc;
 use daemon::{config::TranscodeConfig, job::{Job, JobStatus, load_all_jobs}};
 use ratatui::{
     backend::CrosstermBackend,
@@ -365,7 +366,7 @@ fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
             .to_string();
         
         let elapsed = if let Some(started) = job.started_at {
-            let dur = chrono::Utc::now() - started;
+            let dur = Utc::now() - started;
             format!("{}s", dur.num_seconds())
         } else {
             "-".to_string()
