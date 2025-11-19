@@ -15,4 +15,6 @@ tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+log = "0.4"
+env_logger = "0.11"
 

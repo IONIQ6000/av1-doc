@@ -162,6 +162,7 @@ Requires=docker.service
 [Service]
 Type=simple
 User=root
+Environment="RUST_LOG=info"
 ExecStart=$BIN_DIR/av1d --config /etc/av1d/config.json
 Restart=always
 RestartSec=10

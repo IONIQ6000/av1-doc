@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::fs;
 use std::collections::HashSet;
 use chrono::Utc;
+use log::{info, warn, error, debug};
 
 /// AV1 transcoding daemon
 #[derive(Parser, Debug)]
@@ -24,19 +25,32 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize logger - use RUST_LOG env var or default to info level
+    env_logger::Builder::from_default_env()
+        .format_timestamp_secs()
+        .init();
+
     let args = Args::parse();
 
     // Load configuration
     let cfg = TranscodeConfig::load_config(args.config.as_deref())
         .context("Failed to load configuration")?;
 
-    if args.verbose {
-        println!("Configuration loaded:");
-        println!("  Library roots: {:?}", cfg.library_roots);
-        println!("  Min bytes: {}", cfg.min_bytes);
-        println!("  Max size ratio: {}", cfg.max_size_ratio);
-        println!("  Job state dir: {}", cfg.job_state_dir.display());
-        println!("  Scan interval: {}s", cfg.scan_interval_secs);
+    info!("AV1 Daemon starting");
+    info!("Configuration loaded:");
+    info!("  Library roots: {:?}", cfg.library_roots);
+    info!("  Min bytes: {}", cfg.min_bytes);
+    info!("  Max size ratio: {}", cfg.max_size_ratio);
+    info!("  Job state dir: {}", cfg.job_state_dir.display());
+    info!("  Scan interval: {}s", cfg.scan_interval_secs);
+    
+    // Verify library roots exist
+    for root in &cfg.library_roots {
+        if root.exists() {
+            info!("Library root exists: {}", root.display());
+        } else {
+            warn!("Library root does not exist: {}", root.display());
+        }
     }
 
     // Ensure job state directory exists
@@ -45,54 +59,68 @@ async fn main() -> Result<()> {
 
     // Main daemon loop
     loop {
-        // Scan library for candidates
-        if args.verbose {
-            println!("Scanning library...");
-        }
+        info!("Starting library scan...");
 
         let scan_results = scan::scan_library(&cfg).await
             .context("Failed to scan library")?;
 
+        info!("Scan completed: found {} files", scan_results.len());
+
         // Create jobs for new candidates
         let existing_jobs = load_all_jobs(&cfg.job_state_dir)
             .context("Failed to load existing jobs")?;
+
+        info!("Loaded {} existing jobs", existing_jobs.len());
 
         let existing_paths: HashSet<_> = existing_jobs
             .iter()
             .map(|j| &j.source_path)
             .collect();
 
+        let mut candidates_count = 0;
+        let mut skipped_count = 0;
+        let mut new_jobs_count = 0;
+
         for result in scan_results {
             match result {
                 scan::ScanResult::Candidate(path, size) => {
+                    candidates_count += 1;
                     if !existing_paths.contains(&path) {
                         let mut job = Job::new(path.clone());
                         job.original_bytes = Some(size);
                         save_job(&job, &cfg.job_state_dir)
                             .with_context(|| format!("Failed to save job for: {}", path.display()))?;
 
-                        if args.verbose {
-                            println!("Created job {} for: {}", job.id, path.display());
-                        }
+                        new_jobs_count += 1;
+                        info!("Created job {} for: {} ({} bytes)", job.id, path.display(), size);
+                    } else {
+                        debug!("File already has a job: {}", path.display());
                     }
                 }
                 scan::ScanResult::Skipped(path, reason) => {
-                    if args.verbose {
-                        println!("Skipped {}: {}", path.display(), reason);
-                    }
+                    skipped_count += 1;
+                    debug!("Skipped {}: {}", path.display(), reason);
                 }
             }
         }
+
+        info!("Scan summary: {} candidates, {} skipped, {} new jobs created", 
+              candidates_count, skipped_count, new_jobs_count);
 
         // Process pending jobs
         let mut jobs = load_all_jobs(&cfg.job_state_dir)
             .context("Failed to load jobs")?;
 
+        let pending_count = jobs.iter().filter(|j| j.status == JobStatus::Pending).count();
+        let running_count = jobs.iter().filter(|j| j.status == JobStatus::Running).count();
+
+        if pending_count > 0 {
+            info!("Found {} pending jobs, {} running jobs", pending_count, running_count);
+        }
+
         // Find a pending job
         if let Some(job) = jobs.iter_mut().find(|j| j.status == JobStatus::Pending) {
-            if args.verbose {
-                println!("Processing job {}: {}", job.id, job.source_path.display());
-            }
+            info!("Processing job {}: {}", job.id, job.source_path.display());
 
             job.status = JobStatus::Running;
             job.started_at = Some(Utc::now());
@@ -101,30 +129,35 @@ async fn main() -> Result<()> {
             // Process the job
             match process_job(&cfg, job).await {
                 Ok(()) => {
-                    if args.verbose {
-                        println!("Job {} completed successfully", job.id);
-                    }
+                    info!("Job {} completed successfully", job.id);
                 }
                 Err(e) => {
-                    eprintln!("Job {} failed: {}", job.id, e);
+                    error!("Job {} failed: {}", job.id, e);
                     job.status = JobStatus::Failed;
                     job.reason = Some(format!("{}", e));
                     job.finished_at = Some(Utc::now());
                     save_job(job, &cfg.job_state_dir)?;
                 }
             }
+        } else if pending_count == 0 && running_count == 0 {
+            debug!("No pending or running jobs, waiting for next scan");
         }
 
         // Sleep before next scan
+        info!("Sleeping for {} seconds before next scan", cfg.scan_interval_secs);
         tokio::time::sleep(tokio::time::Duration::from_secs(cfg.scan_interval_secs)).await;
     }
 }
 
 /// Process a single job: probe, classify, transcode, and apply size gate
 async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
+    info!("Job {}: Starting ffprobe for {}", job.id, job.source_path.display());
+    
     // Step 1: Run ffprobe to get metadata
     let meta = ffprobe::probe_file(cfg, &job.source_path).await
         .with_context(|| format!("Failed to probe file: {}", job.source_path.display()))?;
+    
+    info!("Job {}: ffprobe completed, found {} streams", job.id, meta.streams.len());
 
     // Step 2: Check for video streams
     let video_streams: Vec<_> = meta.streams
