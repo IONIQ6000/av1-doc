@@ -48,11 +48,18 @@ impl App {
         self.system.refresh_all();
 
         // Reload jobs
-        self.jobs = load_all_jobs(&self.job_state_dir)
-            .context("Failed to load jobs")?;
-
-        // Sort by creation time (newest first)
-        self.jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        match load_all_jobs(&self.job_state_dir) {
+            Ok(jobs) => {
+                self.jobs = jobs;
+                // Sort by creation time (newest first)
+                self.jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            }
+            Err(e) => {
+                // Log error but don't crash - show empty table
+                eprintln!("Warning: Failed to load jobs from {}: {}", self.job_state_dir.display(), e);
+                self.jobs = Vec::new();
+            }
+        }
 
         Ok(())
     }
@@ -68,6 +75,11 @@ fn main() -> Result<()> {
     // Load config (same logic as daemon)
     let cfg = TranscodeConfig::load_config(args.config.as_deref())
         .context("Failed to load configuration")?;
+    
+    eprintln!("TUI: Using job state directory: {}", cfg.job_state_dir.display());
+    if !cfg.job_state_dir.exists() {
+        eprintln!("Warning: Job state directory does not exist: {}", cfg.job_state_dir.display());
+    }
 
     // Setup terminal
     crossterm::terminal::enable_raw_mode()?;
