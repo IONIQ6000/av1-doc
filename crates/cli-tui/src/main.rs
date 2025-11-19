@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use clap::Parser;
 use daemon::{config::TranscodeConfig, job::{Job, JobStatus, load_all_jobs}};
 use ratatui::{
     backend::CrosstermBackend,
@@ -13,6 +14,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 use sysinfo::System;
 use humansize::{format_size, DECIMAL};
+
+/// AV1 transcoding daemon TUI monitor
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path to configuration file (JSON or TOML)
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+}
 
 struct App {
     jobs: Vec<Job>,
@@ -53,9 +63,11 @@ impl App {
 }
 
 fn main() -> Result<()> {
-    // Load config to get job_state_dir
-    let cfg = TranscodeConfig::load_config(None)
-        .context("Failed to load default configuration")?;
+    let args = Args::parse();
+    
+    // Load config (same logic as daemon)
+    let cfg = TranscodeConfig::load_config(args.config.as_deref())
+        .context("Failed to load configuration")?;
 
     // Setup terminal
     crossterm::terminal::enable_raw_mode()?;
