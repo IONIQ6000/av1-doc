@@ -15,6 +15,33 @@ use std::time::Duration;
 use sysinfo::System;
 use humansize::{format_size, DECIMAL};
 
+/// Estimate space savings in GB for AV1 transcoding
+/// Uses conservative AV1 compression ratios based on typical codec efficiency:
+/// - HEVC sources: ~2.5:1 compression (40% of original = 60% savings)
+/// - H.264 sources: ~3.5:1 compression (28.5% of original = 71.5% savings)
+/// - Unknown/other: ~2.0:1 compression (50% of original = 50% savings)
+/// 
+/// For estimation without codec info, we use a conservative 2.5:1 ratio
+/// which represents typical AV1 efficiency vs modern codecs (HEVC)
+fn estimate_space_savings_gb(original_bytes: Option<u64>) -> Option<f64> {
+    let orig_bytes = original_bytes?;
+    if orig_bytes == 0 {
+        return None;
+    }
+    
+    // Use conservative AV1 compression ratio of 2.5:1
+    // This means the output will be approximately 40% of the original size
+    // Savings = 60% of original
+    // Based on research: AV1 typically achieves 50-60% bitrate reduction vs HEVC
+    // For file size estimation, we use 2.5:1 ratio (conservative estimate)
+    let compression_ratio = 2.5;
+    let estimated_output_bytes = orig_bytes as f64 / compression_ratio;
+    let estimated_savings_bytes = orig_bytes as f64 - estimated_output_bytes;
+    
+    // Convert to GB (1 GB = 1,000,000,000 bytes)
+    Some(estimated_savings_bytes / 1_000_000_000.0)
+}
+
 struct App {
     jobs: Vec<Job>,
     system: System,
@@ -385,11 +412,19 @@ fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
             .map(|b| format_size(b, DECIMAL))
             .unwrap_or_else(|| "-".to_string());
         
-        // Savings percentage
+        // Savings percentage (actual if completed, estimated if pending/running)
         let savings = if let (Some(orig), Some(new)) = (job.original_bytes, job.new_bytes) {
+            // Actual savings if transcoding is complete
             if orig > 0 {
                 let pct = ((orig - new) as f64 / orig as f64) * 100.0;
                 format!("{:.1}%", pct)
+            } else {
+                "-".to_string()
+            }
+        } else if let Some(orig) = job.original_bytes {
+            // Estimate savings if not yet transcoded
+            if let Some(savings_gb) = estimate_space_savings_gb(Some(orig)) {
+                format!("~{:.1}GB", savings_gb)
             } else {
                 "-".to_string()
             }
@@ -418,7 +453,7 @@ fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
         // Format as table-like display with all columns
         let info_lines = vec![
             format!("ST: {} | FILE: {}", status_str, truncate_string(&file_name, 50)),
-            format!("ORIG: {} | NEW: {} | SAVE: {} | TIME: {}", orig_size, new_size, savings, duration),
+            format!("ORIG: {} | NEW: {} | EST SAVE: {} | TIME: {}", orig_size, new_size, savings, duration),
             format!("REASON: {}", truncate_string(reason, 70)),
         ];
         
@@ -520,7 +555,7 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
         "FILE",    // FILE
         "ORIG",    // ORIG SIZE
         "NEW",     // NEW SIZE
-        "SAVE",    // SAVINGS
+        "EST SAVE", // ESTIMATED SAVINGS (GB) or ACTUAL SAVINGS (%)
         "TIME",    // DURATION
         "REASON",  // REASON
     ])
@@ -571,9 +606,17 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
                     .unwrap_or_else(|| "-".to_string());
 
                 let savings = if let (Some(orig), Some(new)) = (job.original_bytes, job.new_bytes) {
+                    // Actual savings if transcoding is complete
                     if orig > 0 {
                         let pct = ((orig - new) as f64 / orig as f64) * 100.0;
                         format!("{:.1}%", pct)
+                    } else {
+                        "-".to_string()
+                    }
+                } else if let Some(orig) = job.original_bytes {
+                    // Estimate savings if not yet transcoded
+                    if let Some(savings_gb) = estimate_space_savings_gb(Some(orig)) {
+                        format!("~{:.1}GB", savings_gb)
                     } else {
                         "-".to_string()
                     }
@@ -618,12 +661,12 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Use Percentage for flexible columns to fill available width
     let widths = [
         Constraint::Length(5),        // ST (PEND/RUN/etc - shorter now)
-        Constraint::Percentage(40),    // FILE (largest flexible column)
+        Constraint::Percentage(35),   // FILE (largest flexible column)
         Constraint::Length(9),        // ORIG SIZE
         Constraint::Length(9),        // NEW SIZE
-        Constraint::Length(7),        // SAVE
+        Constraint::Length(10),       // EST SAVE (wider for "~X.XGB" format)
         Constraint::Length(6),        // TIME
-        Constraint::Percentage(24),   // REASON (flexible, remaining space)
+        Constraint::Percentage(26),   // REASON (flexible, remaining space)
     ];
 
     let title = if app.jobs.is_empty() {
