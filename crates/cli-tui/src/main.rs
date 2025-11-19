@@ -36,26 +36,28 @@ impl App {
     }
     
     fn get_gpu_usage(&self) -> f64 {
-        // Try to read GPU utilization from sysfs
-        // For Intel GPUs, check various sysfs paths
-        // Build paths based on configured GPU device
+        // For Intel Arc GPUs, GPU busy percentage is in /sys/class/drm/card*/gt/busy
+        // Try multiple card numbers and GT slices
         let mut paths = Vec::new();
         
-        // Try common paths
-        paths.push("/sys/class/drm/card0/device/gpu_busy_percent".to_string());
-        paths.push("/sys/class/drm/renderD128/device/gpu_busy_percent".to_string());
-        paths.push("/sys/kernel/debug/dri/0/i915_frequency_info".to_string());
-        
-        // Try to derive path from gpu_device_path if it's a render node
-        if let Some(render_name) = self.gpu_device_path.file_name().and_then(|n| n.to_str()) {
-            paths.push(format!("/sys/class/drm/{}/device/gpu_busy_percent", render_name));
+        // Try card0 through card3, and gt0 through gt3 (most systems have 1-2 GTs)
+        for card_num in 0..4 {
+            for gt_num in 0..4 {
+                paths.push(format!("/sys/class/drm/card{}/gt{}/busy", card_num, gt_num));
+            }
         }
+        
+        // Also try the old paths for compatibility
+        paths.push("/sys/class/drm/card0/device/gpu_busy_percent".to_string());
+        paths.push("/sys/kernel/debug/dri/0/i915_frequency_info".to_string());
         
         for path_str in paths {
             if let Ok(content) = std::fs::read_to_string(&path_str) {
-                // Try to parse percentage from various formats
-                // Format 1: Just a number "45"
-                if let Ok(val) = content.trim().parse::<f64>() {
+                let trimmed = content.trim();
+                
+                // Format 1: Direct percentage value (e.g., "45" or "45.5")
+                if let Ok(val) = trimmed.parse::<f64>() {
+                    // The busy file contains percentage (0-100)
                     return val.min(100.0).max(0.0);
                 }
                 
