@@ -38,110 +38,25 @@ impl App {
     fn get_gpu_usage(&self) -> f64 {
         use std::process::Command;
         
-        // Method 1: Try reading from sysfs paths
-        let mut paths = Vec::new();
-        
-        // Try to extract card number from gpu_device_path if it's a render node
-        // e.g., /dev/dri/renderD128 -> card0, /dev/dri/renderD129 -> card1
-        let mut card_nums = vec![0, 1, 2, 3]; // Default to try all
-        
-        if let Some(render_name) = self.gpu_device_path.file_name().and_then(|n| n.to_str()) {
-            // renderD128 -> card0, renderD129 -> card1, etc.
-            if render_name.starts_with("renderD") {
-                if let Ok(render_num) = render_name[7..].parse::<u32>() {
-                    // renderD128 is typically card0, renderD129 is card1
-                    let card_num = (render_num - 128) as usize;
-                    if card_num < 4 {
-                        card_nums.insert(0, card_num); // Try this card first
-                    }
-                }
-            }
-        }
-        
-        // Try card numbers, prioritizing the one from gpu_device_path
-        for &card_num in &card_nums {
-            for gt_num in 0..4 {
-                paths.push(format!("/sys/class/drm/card{}/gt{}/busy", card_num, gt_num));
-            }
-            // Also try without gt subdirectory
-            paths.push(format!("/sys/class/drm/card{}/gt/busy", card_num));
-            paths.push(format!("/sys/class/drm/card{}/device/gpu_busy_percent", card_num));
-        }
-        
-        // Try debug paths
-        paths.push("/sys/kernel/debug/dri/0/i915_frequency_info".to_string());
-        
-        for path_str in paths {
-            if let Ok(content) = std::fs::read_to_string(&path_str) {
-                let trimmed = content.trim();
-                
-                // Direct percentage value
-                if let Ok(val) = trimmed.parse::<f64>() {
-                    return val.min(100.0).max(0.0);
-                }
-                
-                // Parse from frequency info format
+        // Method 1: Try reading from /sys/kernel/debug/dri/*/i915_frequency_info
+        // This is the most reliable source for Intel GPUs (requires debugfs mounted)
+        for dri_num in 0..4 {
+            let debug_path = format!("/sys/kernel/debug/dri/{}/i915_frequency_info", dri_num);
+            if let Ok(content) = std::fs::read_to_string(&debug_path) {
+                // Parse the frequency info file
+                // Format example: "actual frequency: 800 MHz, GPU busy: 45%"
                 for line in content.lines() {
-                    if let Some(percent_pos) = line.find("busy:") {
-                        let after_busy = &line[percent_pos + 5..];
-                        if let Some(pct_pos) = after_busy.find('%') {
-                            let num_str = &after_busy[..pct_pos].trim();
-                            if let Ok(val) = num_str.parse::<f64>() {
-                                return val.min(100.0).max(0.0);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Method 2: Try reading from /sys/class/drm/card*/gt/rc6_residency_ms
-        // This can give us an indication of GPU activity
-        for &card_num in &card_nums {
-            for gt_num in 0..4 {
-                // Try reading RC6 residency - if GPU is in RC6 (low power), it's less busy
-                let rc6_path = format!("/sys/class/drm/card{}/gt{}/rc6_residency_ms", card_num, gt_num);
-                if let Ok(rc6_content) = std::fs::read_to_string(&rc6_path) {
-                    // RC6 residency is a percentage (0-100) of time in low power state
-                    // GPU busy = 100 - RC6 residency
-                    if let Ok(rc6_pct) = rc6_content.trim().parse::<f64>() {
-                        let busy_pct = 100.0 - rc6_pct;
-                        return busy_pct.min(100.0).max(0.0);
-                    }
-                }
-            }
-        }
-        
-        // Method 3: Try reading from /sys/class/drm/card*/gt/freq_factor
-        // This shows current frequency vs max frequency
-        for &card_num in &card_nums {
-            for gt_num in 0..4 {
-                let freq_factor_path = format!("/sys/class/drm/card{}/gt{}/freq_factor", card_num, gt_num);
-                if let Ok(freq_content) = std::fs::read_to_string(&freq_factor_path) {
-                    // freq_factor is 0-100, represents frequency utilization
-                    if let Ok(freq_factor) = freq_content.trim().parse::<f64>() {
-                        return freq_factor.min(100.0).max(0.0);
-                    }
-                }
-            }
-        }
-        
-        // Method 4: Try using intel_gpu_top if available (may fail due to PMU permissions)
-        // Run: intel_gpu_top -l 1 -n 1 and parse output
-        if let Ok(output) = Command::new("intel_gpu_top")
-            .args(&["-l", "1", "-n", "1"])
-            .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                // Look for busy percentage in output
-                for line in stdout.lines() {
-                    if line.contains("busy") || line.contains("Busy") {
-                        // Try to extract percentage
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        for part in parts {
-                            if part.ends_with('%') {
-                                if let Ok(val) = part.trim_end_matches('%').parse::<f64>() {
+                    // Look for "GPU busy" or "busy" percentage
+                    if let Some(busy_pos) = line.to_lowercase().find("busy") {
+                        // Find the original line (case-sensitive)
+                        let original_line = &line[busy_pos..];
+                        // Look for number followed by %
+                        if let Some(pct_pos) = original_line.find('%') {
+                            let before_pct = &original_line[..pct_pos];
+                            // Extract the last number before %
+                            let parts: Vec<&str> = before_pct.split_whitespace().collect();
+                            if let Some(last_part) = parts.last() {
+                                if let Ok(val) = last_part.parse::<f64>() {
                                     return val.min(100.0).max(0.0);
                                 }
                             }
@@ -151,19 +66,47 @@ impl App {
             }
         }
         
-        // Method 3: Try reading from /sys/kernel/debug/dri/0/i915_frequency_info
-        // This file might need root access
-        if let Ok(content) = std::fs::read_to_string("/sys/kernel/debug/dri/0/i915_frequency_info") {
-            for line in content.lines() {
-                if line.contains("busy") || line.contains("Busy") {
-                    // Extract percentage
-                    if let Some(pct_start) = line.find('%') {
-                        let before_pct = &line[..pct_start];
-                        // Find the number before %
-                        let parts: Vec<&str> = before_pct.split_whitespace().collect();
-                        if let Some(last_part) = parts.last() {
-                            if let Ok(val) = last_part.parse::<f64>() {
-                                return val.min(100.0).max(0.0);
+        // Method 2: Try reading from device directory - check for any utilization files
+        // Check card0 device directory for any files that might contain usage info
+        let device_dir = "/sys/class/drm/card0/device";
+        if let Ok(entries) = std::fs::read_dir(device_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    let name_lower = name.to_lowercase();
+                    if name_lower.contains("busy") || name_lower.contains("utilization") || 
+                       name_lower.contains("load") || name_lower.contains("usage") {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            let trimmed = content.trim();
+                            // Try parsing as percentage directly
+                            if let Ok(val) = trimmed.parse::<f64>() {
+                                // If value is > 1, might be in 0-100 range, otherwise 0-1
+                                let pct = if val > 1.0 { val } else { val * 100.0 };
+                                return pct.min(100.0).max(0.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Method 3: Try using intel_gpu_top with timeout (may fail due to PMU)
+        // Use timeout to prevent hanging
+        if let Ok(output) = Command::new("timeout")
+            .args(&["1", "intel_gpu_top", "-l", "1", "-n", "1"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let line_lower = line.to_lowercase();
+                    if line_lower.contains("busy") {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        for part in parts {
+                            if part.ends_with('%') {
+                                if let Ok(val) = part.trim_end_matches('%').parse::<f64>() {
+                                    return val.min(100.0).max(0.0);
+                                }
                             }
                         }
                     }

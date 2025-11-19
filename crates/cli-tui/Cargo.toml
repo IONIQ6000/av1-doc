@@ -18,4 +18,5 @@ sysinfo.workspace = true
 humansize.workspace = true
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
+regex = "1"
 
