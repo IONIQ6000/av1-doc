@@ -159,8 +159,13 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     info!("Job {}: Starting ffprobe for {}", job.id, job.source_path.display());
     
     // Step 1: Run ffprobe to get metadata
-    let meta = ffprobe::probe_file(cfg, &job.source_path).await
-        .with_context(|| format!("Failed to probe file: {}", job.source_path.display()))?;
+    let meta = match ffprobe::probe_file(cfg, &job.source_path).await {
+        Ok(m) => m,
+        Err(e) => {
+            error!("Job {}: ffprobe failed: {}", job.id, e);
+            return Err(e).with_context(|| format!("Failed to probe file: {}", job.source_path.display()));
+        }
+    };
     
     info!("Job {}: ffprobe completed, found {} streams", job.id, meta.streams.len());
 

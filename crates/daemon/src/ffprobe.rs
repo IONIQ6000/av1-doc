@@ -86,10 +86,14 @@ pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFPro
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let exit_code = output.status.code().unwrap_or(-1);
         anyhow::bail!(
-            "ffprobe failed for {}: {}",
+            "ffprobe failed (exit code {}) for {}:\nSTDERR: {}\nSTDOUT: {}",
+            exit_code,
             file_path.display(),
-            stderr
+            stderr,
+            stdout
         );
     }
 
