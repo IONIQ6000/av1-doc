@@ -175,8 +175,11 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         .filter(|s| s.codec_type.as_deref() == Some("video"))
         .collect();
 
+    info!("Job {}: Found {} video streams", job.id, video_streams.len());
+
     if video_streams.is_empty() {
         let reason = "not a video".to_string();
+        info!("Job {}: Skipping - {}", job.id, reason);
         sidecar::write_why_txt(&job.source_path, &reason)?;
         job.status = JobStatus::Skipped;
         job.reason = Some(reason);
@@ -186,8 +189,14 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     }
 
     // Step 3: Check if already AV1
+    let video_codecs: Vec<&str> = video_streams.iter()
+        .filter_map(|s| s.codec_name.as_deref())
+        .collect();
+    info!("Job {}: Video codecs found: {:?}", job.id, video_codecs);
+    
     if video_streams.iter().any(|s| s.codec_name.as_deref() == Some("av1")) {
         let reason = "already av1".to_string();
+        info!("Job {}: Skipping - {}", job.id, reason);
         sidecar::write_why_txt(&job.source_path, &reason)?;
         job.status = JobStatus::Skipped;
         job.reason = Some(reason);
@@ -196,14 +205,19 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         return Ok(());
     }
 
+    info!("Job {}: File is not AV1, proceeding with transcode", job.id);
+
     // Step 4: Classify source
     let decision = classifier::classify_web_source(&job.source_path, &meta.format, &meta.streams);
     job.is_web_like = decision.is_web_like();
+    info!("Job {}: Source classification: {:?} (web_like: {})", job.id, decision.class, job.is_web_like);
 
     // Step 5: Generate temp output path
     let temp_output = job.source_path.with_extension("tmp.av1.mkv");
+    info!("Job {}: Temp output will be: {}", job.id, temp_output.display());
 
     // Step 6: Run transcoding
+    info!("Job {}: Starting ffmpeg transcoding...", job.id);
     let ffmpeg_result = ffmpeg_docker::run_av1_vaapi_job(
         cfg,
         &job.source_path,
