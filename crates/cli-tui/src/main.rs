@@ -15,15 +15,6 @@ use std::time::Duration;
 use sysinfo::System;
 use humansize::{format_size, DECIMAL};
 
-/// AV1 transcoding daemon TUI monitor
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// Path to configuration file (JSON or TOML)
-    #[arg(short, long)]
-    config: Option<PathBuf>,
-}
-
 struct App {
     jobs: Vec<Job>,
     system: System,
@@ -148,44 +139,50 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// AV1 transcoding daemon TUI monitor
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path to configuration file (JSON or TOML)
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+}
+
 fn ui(f: &mut Frame, app: &mut App) {
     let size = f.size();
     
-    // Ensure we have enough space
-    if size.height < 7 {
-        // Terminal too small, show error message
-        let error_msg = Paragraph::new("Terminal too small! Please resize to at least 7 lines.")
-            .block(Block::default().borders(Borders::ALL).title("Error"));
+    // Check minimum terminal size
+    if size.height < 10 || size.width < 80 {
+        let error_msg = Paragraph::new("Terminal too small! Please resize to at least 80x10.")
+            .block(Block::default().borders(Borders::ALL).title("Error"))
+            .style(Style::default().fg(Color::Red));
         f.render_widget(error_msg, size);
         return;
     }
     
-    let chunks = Layout::default()
+    // Create vertical layout with explicit constraints
+    let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // System metrics (fixed 3 lines)
-            Constraint::Min(5),    // Job table (minimum 5 lines, rest of space)
-            Constraint::Length(3), // Status bar (fixed 3 lines)
+            Constraint::Length(3),  // Top bar: CPU/Memory (exactly 3 lines)
+            Constraint::Min(5),     // Middle: Job table (at least 5 lines, rest of space)
+            Constraint::Length(3),  // Bottom: Status bar (exactly 3 lines)
         ])
         .split(size);
-
-    // System metrics (CPU and memory) - render in first chunk
-    if chunks[0].height > 0 {
-        render_system_metrics(f, app, chunks[0]);
-    }
-
-    // Job table - render in second chunk
-    if chunks[1].height > 0 {
-        render_job_table(f, &mut *app, chunks[1]);
-    }
-
-    // Status bar - render in third chunk
-    if chunks[2].height > 0 {
-        render_status_bar(f, app, chunks[2]);
-    }
+    
+    // Render each section in its allocated area
+    render_top_bar(f, app, main_chunks[0]);
+    render_job_table(f, app, main_chunks[1]);
+    render_status_bar(f, app, main_chunks[2]);
 }
 
-fn render_system_metrics(f: &mut Frame, app: &App, area: Rect) {
+fn render_top_bar(f: &mut Frame, app: &App, area: Rect) {
+    // Split top bar into two equal halves for CPU and Memory
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
     // Get CPU usage and clamp to 0-100 range
     let cpu_raw = app.system.global_cpu_usage();
     let cpu_usage = if cpu_raw.is_nan() || cpu_raw.is_infinite() {
@@ -208,12 +205,7 @@ fn render_system_metrics(f: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    // CPU gauge - ensure value is in valid range
+    // CPU gauge
     let cpu_percent_u16 = cpu_usage.min(100.0).max(0.0) as u16;
     let cpu_gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title("CPU"))
@@ -222,7 +214,7 @@ fn render_system_metrics(f: &mut Frame, app: &App, area: Rect) {
         .label(format!("{:.1}%", cpu_usage));
     f.render_widget(cpu_gauge, chunks[0]);
 
-    // Memory gauge - ensure value is in valid range
+    // Memory gauge
     let memory_percent_u16 = memory_percent.min(100.0).max(0.0) as u16;
     let memory_gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title("Memory"))
@@ -233,32 +225,32 @@ fn render_system_metrics(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
-    // Ensure we don't render outside the allocated area
+    // Ensure we have minimum space (header + 1 row + borders = 3 lines minimum)
     if area.height < 3 {
-        // Area too small, show error
-        let error_msg = Paragraph::new("Not enough space for job table")
-            .block(Block::default().borders(Borders::ALL));
+        let error_msg = Paragraph::new("Not enough space")
+            .block(Block::default().borders(Borders::ALL).title("Jobs"));
         f.render_widget(error_msg, area);
         return;
     }
     
-    // Calculate how many rows we can fit (header + border = 2 lines, so area.height - 2)
-    let max_rows = (area.height as usize).saturating_sub(2);
+    // Calculate available rows: area.height - 2 (for header and borders)
+    let available_height = area.height as usize;
+    let max_data_rows = available_height.saturating_sub(2); // Subtract header and bottom border
     
     let header = Row::new(vec![
         "STATUS",
         "FILE",
         "ORIG SIZE",
         "NEW SIZE",
-        "SAVINGS %",
+        "SAVINGS",
         "DURATION",
         "REASON",
     ])
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
 
+    // Build rows - limit to what fits on screen
     let rows: Vec<Row> = if app.jobs.is_empty() {
-        // Show a message when no jobs
         vec![Row::new(vec![
             "No jobs".to_string(),
             format!("Dir: {}", app.job_state_dir.display()),
@@ -269,110 +261,91 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
             "-".to_string(),
         ]).height(1)]
     } else {
+        let num_rows = max_data_rows.min(20).min(app.jobs.len());
         app.jobs
-        .iter()
-        .take(max_rows.min(20)) // Limit to available space or 20, whichever is smaller
-        .map(|job| {
-            let status_str = match job.status {
-                JobStatus::Pending => "PENDING",
-                JobStatus::Running => "RUNNING",
-                JobStatus::Success => "SUCCESS",
-                JobStatus::Failed => "FAILED",
-                JobStatus::Skipped => "SKIPPED",
-            };
+            .iter()
+            .take(num_rows)
+            .map(|job| {
+                let status_str = match job.status {
+                    JobStatus::Pending => "PENDING",
+                    JobStatus::Running => "RUNNING",
+                    JobStatus::Success => "SUCCESS",
+                    JobStatus::Failed => "FAILED",
+                    JobStatus::Skipped => "SKIPPED",
+                };
 
-            // Truncate filename to prevent overflow
-            let file_name = job.source_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?")
-                .to_string();
-            let file_name = if file_name.len() > 40 {
-                format!("{}...", &file_name[..37])
-            } else {
-                file_name
-            };
+                // Truncate filename
+                let file_name = job.source_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let file_name = truncate_string(&file_name, 35);
 
-            let orig_size = job.original_bytes
-                .map(|b| format_size(b, DECIMAL))
-                .unwrap_or_else(|| "-".to_string());
+                let orig_size = job.original_bytes
+                    .map(|b| format_size(b, DECIMAL))
+                    .unwrap_or_else(|| "-".to_string());
 
-            let new_size = job.new_bytes
-                .map(|b| format_size(b, DECIMAL))
-                .unwrap_or_else(|| "-".to_string());
+                let new_size = job.new_bytes
+                    .map(|b| format_size(b, DECIMAL))
+                    .unwrap_or_else(|| "-".to_string());
 
-            let savings = if let (Some(orig), Some(new)) = (job.original_bytes, job.new_bytes) {
-                if orig > 0 {
-                    let pct = ((orig - new) as f64 / orig as f64) * 100.0;
-                    format!("{:.1}%", pct)
+                let savings = if let (Some(orig), Some(new)) = (job.original_bytes, job.new_bytes) {
+                    if orig > 0 {
+                        let pct = ((orig - new) as f64 / orig as f64) * 100.0;
+                        format!("{:.1}%", pct)
+                    } else {
+                        "-".to_string()
+                    }
                 } else {
                     "-".to_string()
-                }
-            } else {
-                "-".to_string()
-            };
+                };
 
-            let duration = if let (Some(started), Some(finished)) = (job.started_at, job.finished_at) {
-                let dur = finished - started;
-                format!("{}s", dur.num_seconds())
-            } else {
-                "-".to_string()
-            };
+                let duration = if let (Some(started), Some(finished)) = (job.started_at, job.finished_at) {
+                    let dur = finished - started;
+                    format!("{}s", dur.num_seconds())
+                } else {
+                    "-".to_string()
+                };
 
-            // Truncate reason to prevent overflow
-            let reason = job.reason.as_deref().unwrap_or("-");
-            let reason = if reason.len() > 30 {
-                format!("{}...", &reason[..27])
-            } else {
-                reason.to_string()
-            };
+                let reason = truncate_string(job.reason.as_deref().unwrap_or("-"), 25);
 
-            Row::new(vec![
-                status_str.to_string(),
-                file_name,
-                orig_size,
-                new_size,
-                savings,
-                duration,
-                reason,
-            ])
-            .height(1)
-        })
-        .collect()
+                Row::new(vec![
+                    status_str.to_string(),
+                    file_name,
+                    orig_size,
+                    new_size,
+                    savings,
+                    duration,
+                    reason,
+                ])
+                .height(1)
+            })
+            .collect()
     };
 
-    // Use fixed widths that add up properly and prevent overflow
+    // Column widths - use fixed sizes for most, flexible for file and reason
     let widths = [
-        Constraint::Length(10),  // STATUS
-        Constraint::Min(20),     // FILE (flexible, min 20)
-        Constraint::Length(11),  // ORIG SIZE
-        Constraint::Length(11),  // NEW SIZE
-        Constraint::Length(10),  // SAVINGS %
+        Constraint::Length(9),   // STATUS
+        Constraint::Min(20),     // FILE (flexible)
+        Constraint::Length(10),  // ORIG SIZE
+        Constraint::Length(10),  // NEW SIZE
+        Constraint::Length(9),   // SAVINGS
         Constraint::Length(9),   // DURATION
-        Constraint::Min(15),      // REASON (flexible, min 15)
+        Constraint::Min(15),     // REASON (flexible)
     ];
 
     let title = if app.jobs.is_empty() {
-        format!("Jobs (0 found)")
+        "Jobs (0 found)".to_string()
     } else {
-        format!("Jobs (showing {}/{})", app.jobs.len().min(20), app.jobs.len())
+        format!("Jobs ({}/{})", rows.len().saturating_sub(1), app.jobs.len())
     };
-    
-    // Ensure we don't render outside the allocated area
-    if area.height < 3 {
-        // Area too small, show error
-        let error_msg = Paragraph::new("Not enough space for job table")
-            .block(Block::default().borders(Borders::ALL));
-        f.render_widget(error_msg, area);
-        return;
-    }
     
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title))
         .column_spacing(1);
 
-    // Render table within the allocated area
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
 
@@ -386,50 +359,25 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     // Truncate directory path if too long
     let dir_display = app.job_state_dir.display().to_string();
-    let dir_short = if dir_display.len() > 40 {
-        format!("...{}", &dir_display[dir_display.len() - 37..])
-    } else {
-        dir_display
-    };
+    let dir_short = truncate_string(&dir_display, 35);
 
-    let text = Line::from(vec![
-        Span::styled(
-            format!("Total: {} | ", total),
-            Style::default(),
-        ),
-        Span::styled(
-            format!("Running: {} | ", running),
-            Style::default().fg(Color::Green),
-        ),
-        Span::styled(
-            format!("Pending: {} | ", pending),
-            Style::default().fg(Color::Yellow),
-        ),
-        Span::styled(
-            format!("Success: {} | ", success),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled(
-            format!("Failed: {} | ", failed),
-            Style::default().fg(Color::Red),
-        ),
-        Span::styled(
-            format!("Skipped: {} | ", skipped),
-            Style::default().fg(Color::Magenta),
-        ),
-        Span::styled(
-            format!("Dir: {} | ", dir_short),
-            Style::default().fg(Color::Yellow),
-        ),
-        Span::styled(
-            "q=quit r=refresh",
-            Style::default().fg(Color::Cyan),
-        ),
-    ]);
+    let status_text = format!(
+        "Total: {} | Running: {} | Pending: {} | Success: {} | Failed: {} | Skipped: {} | Dir: {} | q=quit r=refresh",
+        total, running, pending, success, failed, skipped, dir_short
+    );
 
-    let paragraph = Paragraph::new(text)
+    let paragraph = Paragraph::new(status_text)
         .block(Block::default().borders(Borders::ALL).title("Status"))
+        .style(Style::default())
         .wrap(ratatui::widgets::Wrap { trim: true });
+    
     f.render_widget(paragraph, area);
 }
 
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}
