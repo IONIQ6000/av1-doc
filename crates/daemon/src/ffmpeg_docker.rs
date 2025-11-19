@@ -72,8 +72,8 @@ pub async fn run_av1_vaapi_job(
     ffmpeg_args.push("vaapi".to_string());
     ffmpeg_args.push("-hwaccel_device".to_string());
     ffmpeg_args.push("/dev/dri/renderD128".to_string());
-    ffmpeg_args.push("-hwaccel_output_format".to_string());
-    ffmpeg_args.push("vaapi".to_string());
+    // Don't use hwaccel_output_format - decode to software, then upload in filter
+    // This is more compatible with various input codecs
 
     // Web-like input flags (if needed)
     if decision.is_web_like() {
@@ -92,7 +92,7 @@ pub async fn run_av1_vaapi_job(
     ffmpeg_args.push(container_input.clone());
 
     // Build video filter chain
-    // VAAPI requires input to be uploaded to hardware first, then format conversion
+    // Decode to software format, then convert and upload to VAAPI
     let mut filter_parts = Vec::new();
 
     // Ensure even dimensions and set SAR (especially for web-like sources)
@@ -102,8 +102,8 @@ pub async fn run_av1_vaapi_job(
     // Convert to NV12 format (required for VAAPI)
     filter_parts.push("format=nv12".to_string());
     
-    // Upload to VAAPI hardware surface
-    filter_parts.push("hwupload".to_string());
+    // Upload to VAAPI hardware surface for encoding
+    filter_parts.push("hwupload=extra_hw_frames=64".to_string());
 
     let filter_chain = filter_parts.join(",");
     ffmpeg_args.push("-vf".to_string());
