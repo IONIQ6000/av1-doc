@@ -38,16 +38,28 @@ impl App {
     fn get_gpu_usage(&self) -> f64 {
         use std::process::Command;
         
-        // Method 1: Try reading GPU frequency and use as proxy for usage
-        // Higher frequency = higher usage (rough approximation)
-        // Read from /sys/class/drm/card0/gt_min_freq_mhz and gt_max_freq_mhz
-        // Then try to read current frequency from various locations
-        let mut min_freq = 0.0;
-        let mut max_freq = 0.0;
-        let mut curr_freq = 0.0;
-        
-        // Try to read min/max frequencies
+        // First, find which card corresponds to Intel GPU (i915 driver)
+        // card0 might be ASpeed (ast driver), Intel Arc could be card1+
+        let mut intel_card_num = None;
         for card_num in 0..4 {
+            let driver_link = format!("/sys/class/drm/card{}/device/driver", card_num);
+            if let Ok(link) = std::fs::read_link(&driver_link) {
+                if let Some(driver_name) = link.file_name().and_then(|n| n.to_str()) {
+                    if driver_name == "i915" {
+                        intel_card_num = Some(card_num);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // If we found Intel GPU card, try reading frequency from it
+        if let Some(card_num) = intel_card_num {
+            let mut min_freq = 0.0;
+            let mut max_freq = 0.0;
+            let mut curr_freq = 0.0;
+            
+            // Try to read min/max/current frequencies from gt subdirectories
             for gt_num in 0..4 {
                 let min_path = format!("/sys/class/drm/card{}/gt{}/gt_min_freq_mhz", card_num, gt_num);
                 let max_path = format!("/sys/class/drm/card{}/gt{}/gt_max_freq_mhz", card_num, gt_num);
@@ -75,12 +87,16 @@ impl App {
                     }
                 }
             }
-        }
-        
-        // If we have frequency info, calculate usage as percentage
-        if max_freq > 0.0 && curr_freq > 0.0 {
-            let usage = ((curr_freq - min_freq) / (max_freq - min_freq)) * 100.0;
-            return usage.min(100.0).max(0.0);
+            
+            // If we have frequency info, calculate usage as percentage
+            if max_freq > 0.0 && curr_freq > 0.0 && min_freq > 0.0 {
+                let usage = if max_freq > min_freq {
+                    ((curr_freq - min_freq) / (max_freq - min_freq)) * 100.0
+                } else {
+                    0.0
+                };
+                return usage.min(100.0).max(0.0);
+            }
         }
         
         // Method 2: Try reading from /sys/kernel/debug/dri/*/i915_frequency_info
