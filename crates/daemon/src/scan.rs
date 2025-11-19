@@ -86,6 +86,18 @@ pub async fn scan_library(cfg: &TranscodeConfig) -> Result<Vec<ScanResult>> {
             media_files_found += 1;
             debug!("Found media file: {}", path.display());
 
+            // Skip temp files from previous transcoding attempts
+            let file_name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if file_name.contains(".av1-tmp.") || file_name.contains(".tmp.av1.") {
+                results.push(ScanResult::Skipped(
+                    path.clone(),
+                    "temp file from previous transcode".to_string(),
+                ));
+                continue;
+            }
+
             // Check skip markers
             if sidecar::has_skip_marker(&path)? {
                 results.push(ScanResult::Skipped(
