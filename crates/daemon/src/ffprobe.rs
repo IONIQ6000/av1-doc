@@ -78,17 +78,18 @@ pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFPro
 
     // Build docker command
     // Note: Using --privileged flag required when Docker runs inside LXC containers
-    // This is necessary for the linuxserver/ffmpeg image to set sysctls
+    // Use --entrypoint to bypass any entrypoint scripts that might interfere
     let mut cmd = Command::new(&cfg.docker_bin);
     cmd.arg("run")
         .arg("--rm")
         .arg("--privileged")
+        .arg("--entrypoint")
+        .arg("ffprobe")
         .arg("--device")
         .arg(format!("{}:{}", cfg.gpu_device.display(), cfg.gpu_device.display()))
         .arg("-v")
         .arg(format!("{}:/config:ro", parent_dir.display()))
         .arg(&cfg.docker_image)
-        .arg("ffprobe")
         .arg("-v")
         .arg("error")
         .arg("-print_format")
@@ -97,7 +98,7 @@ pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFPro
         .arg("-show_format")
         .arg(&container_path);
     
-    debug!("ffprobe command: docker run --rm --privileged --device {}:{} -v {}:/config:ro {} ffprobe -v error -print_format json -show_streams -show_format {}",
+    debug!("ffprobe command: docker run --rm --privileged --entrypoint ffprobe --device {}:{} -v {}:/config:ro {} -v error -print_format json -show_streams -show_format {}",
            cfg.gpu_device.display(), cfg.gpu_device.display(), parent_dir.display(), cfg.docker_image, container_path);
 
     // Execute and capture output
