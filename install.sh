@@ -111,7 +111,34 @@ install_docker() {
     systemctl enable docker
     systemctl start docker
     
-    log_info "Docker installed and started"
+    # Wait for Docker to be ready
+    log_info "Waiting for Docker daemon to start..."
+    sleep 5
+    
+    # Verify Docker is running
+    if systemctl is-active --quiet docker; then
+        log_info "Docker is running"
+    else
+        log_error "Docker failed to start. Attempting to start manually..."
+        systemctl start docker
+        sleep 3
+        if systemctl is-active --quiet docker; then
+            log_info "Docker started successfully"
+        else
+            log_error "Docker still not running. Please check manually: systemctl status docker"
+            exit 1
+        fi
+    fi
+    
+    # Verify docker command works
+    if docker ps &>/dev/null; then
+        log_info "Docker is accessible"
+    else
+        log_warn "Docker command may require root or user needs to be in docker group"
+        log_info "To add user to docker group: usermod -aG docker \$USER"
+    fi
+    
+    log_info "Docker installed and verified"
 }
 
 # Build the project
@@ -247,6 +274,23 @@ main() {
     create_systemd_service
     pull_docker_image
     
+    # Final verification: Check Docker is running
+    log_info ""
+    log_info "Verifying Docker status..."
+    if systemctl is-active --quiet docker; then
+        log_info "✓ Docker service is running"
+    else
+        log_warn "✗ Docker service is not running!"
+        log_info "Starting Docker service..."
+        systemctl start docker
+        sleep 2
+        if systemctl is-active --quiet docker; then
+            log_info "✓ Docker service started"
+        else
+            log_error "✗ Failed to start Docker. Please check: systemctl status docker"
+        fi
+    fi
+    
     log_info ""
     log_info "=========================================="
     log_info "Installation completed successfully!"
@@ -255,12 +299,13 @@ main() {
     log_info "Next steps:"
     log_info "1. Edit configuration: /etc/av1d/config.json"
     log_info "2. Ensure GPU device is accessible: /dev/dri"
-    log_info "3. Enable and start service:"
+    log_info "3. Verify Docker is running: systemctl status docker"
+    log_info "4. Enable and start service:"
     log_info "   systemctl daemon-reload"
     log_info "   systemctl enable av1d"
     log_info "   systemctl start av1d"
-    log_info "4. Monitor with TUI: av1top"
-    log_info "5. Check logs: journalctl -u av1d -f"
+    log_info "5. Monitor with TUI: av1top"
+    log_info "6. Check logs: journalctl -u av1d -f"
     log_info ""
 }
 
