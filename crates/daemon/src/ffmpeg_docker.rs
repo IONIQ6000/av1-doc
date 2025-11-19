@@ -92,14 +92,17 @@ pub async fn run_av1_vaapi_job(
     ffmpeg_args.push(container_input.clone());
 
     // Build video filter chain
+    // VAAPI requires input to be uploaded to hardware first, then format conversion
     let mut filter_parts = Vec::new();
 
     // Ensure even dimensions and set SAR (especially for web-like sources)
     filter_parts.push("pad=ceil(iw/2)*2:ceil(ih/2)*2".to_string());
     filter_parts.push("setsar=1".to_string());
 
-    // VAAPI format conversion and upload
-    filter_parts.push("format=nv12|vaapi".to_string());
+    // Convert to NV12 format (required for VAAPI)
+    filter_parts.push("format=nv12".to_string());
+    
+    // Upload to VAAPI hardware surface
     filter_parts.push("hwupload".to_string());
 
     let filter_chain = filter_parts.join(",");
