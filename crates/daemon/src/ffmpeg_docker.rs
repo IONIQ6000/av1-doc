@@ -41,13 +41,15 @@ pub async fn run_av1_vaapi_job(
     // Build docker command base
     // Note: Using --privileged flag required when Docker runs inside LXC containers
     // Mount /dev/dri as a volume for VAAPI access (better than --device for DRI)
-    // Add user mapping to ensure proper permissions for DRI access
+    // Use --entrypoint to bypass entrypoint script and run ffmpeg directly
     let mut cmd = Command::new(&cfg.docker_bin);
     cmd.arg("run")
         .arg("--rm")
         .arg("--privileged")
         .arg("--user")
         .arg("root") // Run as root to ensure device access
+        .arg("--entrypoint")
+        .arg("ffmpeg")
         .arg("-v")
         .arg("/dev/dri:/dev/dri")
         .arg("-v")
