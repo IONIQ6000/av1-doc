@@ -41,10 +41,13 @@ pub async fn run_av1_vaapi_job(
     // Build docker command base
     // Note: Using --privileged flag required when Docker runs inside LXC containers
     // Mount /dev/dri as a volume for VAAPI access (better than --device for DRI)
+    // Add user mapping to ensure proper permissions for DRI access
     let mut cmd = Command::new(&cfg.docker_bin);
     cmd.arg("run")
         .arg("--rm")
         .arg("--privileged")
+        .arg("--user")
+        .arg("root") // Run as root to ensure device access
         .arg("-v")
         .arg("/dev/dri:/dev/dri")
         .arg("-v")
@@ -60,9 +63,9 @@ pub async fn run_av1_vaapi_job(
     ffmpeg_args.push("-y".to_string());
 
     // VAAPI hardware acceleration setup
-    // Use auto-detection by specifying just "vaapi=va" - it will find renderD128 automatically
+    // Explicitly specify the render node path in init_hw_device
     ffmpeg_args.push("-init_hw_device".to_string());
-    ffmpeg_args.push("vaapi=va".to_string());
+    ffmpeg_args.push("vaapi=va:/dev/dri/renderD128".to_string());
     ffmpeg_args.push("-hwaccel".to_string());
     ffmpeg_args.push("vaapi".to_string());
     ffmpeg_args.push("-hwaccel_device".to_string());
