@@ -36,18 +36,21 @@ impl App {
     }
     
     fn get_gpu_usage(&self) -> f64 {
-        // For Intel Arc GPUs, GPU busy percentage is in /sys/class/drm/card*/gt/busy
-        // Try multiple card numbers and GT slices
+        use std::process::Command;
+        
+        // Method 1: Try reading from sysfs paths
         let mut paths = Vec::new();
         
-        // Try card0 through card3, and gt0 through gt3 (most systems have 1-2 GTs)
+        // Try card0 through card3, and gt0 through gt3
         for card_num in 0..4 {
             for gt_num in 0..4 {
                 paths.push(format!("/sys/class/drm/card{}/gt{}/busy", card_num, gt_num));
             }
+            // Also try without gt subdirectory
+            paths.push(format!("/sys/class/drm/card{}/gt/busy", card_num));
         }
         
-        // Also try the old paths for compatibility
+        // Try other common paths
         paths.push("/sys/class/drm/card0/device/gpu_busy_percent".to_string());
         paths.push("/sys/kernel/debug/dri/0/i915_frequency_info".to_string());
         
@@ -55,19 +58,63 @@ impl App {
             if let Ok(content) = std::fs::read_to_string(&path_str) {
                 let trimmed = content.trim();
                 
-                // Format 1: Direct percentage value (e.g., "45" or "45.5")
+                // Direct percentage value
                 if let Ok(val) = trimmed.parse::<f64>() {
-                    // The busy file contains percentage (0-100)
                     return val.min(100.0).max(0.0);
                 }
                 
-                // Format 2: "GPU freq: 800 MHz, GPU busy: 45%"
+                // Parse from frequency info format
                 for line in content.lines() {
                     if let Some(percent_pos) = line.find("busy:") {
                         let after_busy = &line[percent_pos + 5..];
                         if let Some(pct_pos) = after_busy.find('%') {
                             let num_str = &after_busy[..pct_pos].trim();
                             if let Ok(val) = num_str.parse::<f64>() {
+                                return val.min(100.0).max(0.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Method 2: Try using intel_gpu_top if available
+        // Run: intel_gpu_top -l 1 -n 1 and parse output
+        if let Ok(output) = Command::new("intel_gpu_top")
+            .args(&["-l", "1", "-n", "1"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Look for busy percentage in output
+                for line in stdout.lines() {
+                    if line.contains("busy") || line.contains("Busy") {
+                        // Try to extract percentage
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        for part in parts {
+                            if part.ends_with('%') {
+                                if let Ok(val) = part.trim_end_matches('%').parse::<f64>() {
+                                    return val.min(100.0).max(0.0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Method 3: Try reading from /sys/kernel/debug/dri/0/i915_frequency_info
+        // This file might need root access
+        if let Ok(content) = std::fs::read_to_string("/sys/kernel/debug/dri/0/i915_frequency_info") {
+            for line in content.lines() {
+                if line.contains("busy") || line.contains("Busy") {
+                    // Extract percentage
+                    if let Some(pct_start) = line.find('%') {
+                        let before_pct = &line[..pct_start];
+                        // Find the number before %
+                        let parts: Vec<&str> = before_pct.split_whitespace().collect();
+                        if let Some(last_part) = parts.last() {
+                            if let Ok(val) = last_part.parse::<f64>() {
                                 return val.min(100.0).max(0.0);
                             }
                         }
