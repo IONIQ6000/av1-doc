@@ -57,11 +57,34 @@ impl App {
         
         // If we found Intel GPU card, try reading frequency from it
         if let Some(card_num) = intel_card_num {
+            // Method 1: Try reading frequency files directly from card directory
+            // Intel Arc GPUs have these files: gt_min_freq_mhz, gt_max_freq_mhz, gt_cur_freq_mhz
+            let min_path = format!("/sys/class/drm/card{}/gt_min_freq_mhz", card_num);
+            let max_path = format!("/sys/class/drm/card{}/gt_max_freq_mhz", card_num);
+            let curr_path = format!("/sys/class/drm/card{}/gt_cur_freq_mhz", card_num);
+            
+            if let (Ok(min_content), Ok(max_content), Ok(curr_content)) = (
+                std::fs::read_to_string(&min_path),
+                std::fs::read_to_string(&max_path),
+                std::fs::read_to_string(&curr_path),
+            ) {
+                if let (Ok(min_freq), Ok(max_freq), Ok(curr_freq)) = (
+                    min_content.trim().parse::<f64>(),
+                    max_content.trim().parse::<f64>(),
+                    curr_content.trim().parse::<f64>(),
+                ) {
+                    if max_freq > min_freq && curr_freq >= min_freq {
+                        let usage = ((curr_freq - min_freq) / (max_freq - min_freq)) * 100.0;
+                        return usage.min(100.0).max(0.0);
+                    }
+                }
+            }
+            
+            // Method 2: Try reading from gt subdirectories (gt0, gt1, etc.)
             let mut min_freq = 0.0;
             let mut max_freq = 0.0;
             let mut curr_freq = 0.0;
             
-            // Try to read min/max/current frequencies from gt subdirectories
             for gt_num in 0..4 {
                 let min_path = format!("/sys/class/drm/card{}/gt{}/gt_min_freq_mhz", card_num, gt_num);
                 let max_path = format!("/sys/class/drm/card{}/gt{}/gt_max_freq_mhz", card_num, gt_num);
@@ -90,7 +113,7 @@ impl App {
                 }
             }
             
-            // If we have frequency info, calculate usage as percentage
+            // If we have frequency info from gt subdirectories, calculate usage
             if max_freq > 0.0 && curr_freq > 0.0 && min_freq > 0.0 {
                 let usage = if max_freq > min_freq {
                     ((curr_freq - min_freq) / (max_freq - min_freq)) * 100.0
