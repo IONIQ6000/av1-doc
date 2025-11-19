@@ -37,13 +37,21 @@ impl App {
     
     fn get_gpu_usage(&self) -> f64 {
         // Try to read GPU utilization from sysfs
-        // For Intel GPUs, check /sys/class/drm/card0/device/gpu_busy_percent
-        // Or try reading from /sys/kernel/debug/dri/0/i915_frequency_info
-        let paths = vec![
-            "/sys/class/drm/card0/device/gpu_busy_percent",
-            "/sys/class/drm/renderD128/device/gpu_busy_percent",
-            "/sys/kernel/debug/dri/0/i915_frequency_info",
-        ];
+        // For Intel GPUs, check various sysfs paths
+        // Build paths based on configured GPU device
+        let mut paths = Vec::new();
+        
+        // Try common paths
+        paths.push("/sys/class/drm/card0/device/gpu_busy_percent".to_string());
+        paths.push("/sys/class/drm/renderD128/device/gpu_busy_percent".to_string());
+        paths.push("/sys/kernel/debug/dri/0/i915_frequency_info".to_string());
+        
+        // Try to derive path from gpu_device_path if it's a render node
+        if let Some(render_name) = self.gpu_device_path.file_name().and_then(|n| n.to_str()) {
+            paths.push(format!("/sys/class/drm/{}/device/gpu_busy_percent", render_name));
+        }
+        
+        for path_str in &paths {
         
         for path_str in paths {
             if let Ok(content) = std::fs::read_to_string(path_str) {
