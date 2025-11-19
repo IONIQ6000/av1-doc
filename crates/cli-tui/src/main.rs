@@ -17,85 +17,101 @@ use humansize::{format_size, DECIMAL};
 
 /// Estimate space savings in GB for AV1 transcoding based on video properties
 /// Uses bitrate estimation considering resolution, frame rate, and source codec efficiency
+/// Falls back to codec-based ratio if metadata is incomplete
 fn estimate_space_savings_gb(job: &Job) -> Option<f64> {
     let orig_bytes = job.original_bytes?;
     if orig_bytes == 0 {
         return None;
     }
     
-    // Need video metadata to do proper estimation
-    let (width, height, bitrate_bps, codec, frame_rate_str) = (
-        job.video_width?,
-        job.video_height?,
-        job.video_bitrate?,
-        job.video_codec.as_deref()?,
-        job.video_frame_rate.as_deref()?,
-    );
+    // Try detailed estimation if we have all metadata
+    if let (Some(width), Some(height), Some(bitrate_bps), Some(codec), Some(frame_rate_str)) = (
+        job.video_width,
+        job.video_height,
+        job.video_bitrate,
+        job.video_codec.as_deref(),
+        job.video_frame_rate.as_deref(),
+    ) {
+        // Parse frame rate (format: "30/1" or "29.97")
+        let fps = parse_frame_rate(frame_rate_str).unwrap_or(30.0);
+        
+        // Calculate pixels per frame and total pixels per second
+        let pixels_per_frame = (width * height) as f64;
+        let pixels_per_second = pixels_per_frame * fps;
+        
+        // Estimate AV1 bitrate based on resolution and frame rate
+        // Base bitrate per megapixel-second for AV1 at reasonable quality
+        let base_bitrate_per_megapixel_sec = 0.5; // Mbps per megapixel-second (conservative)
+        let megapixels_per_second = pixels_per_second / 1_000_000.0;
+        let resolution_based_bitrate_mbps = megapixels_per_second * base_bitrate_per_megapixel_sec;
+        
+        // Adjust based on source codec efficiency
+        // AV1 efficiency vs source codec (bitrate reduction factor)
+        let codec_efficiency_factor = match codec.to_lowercase().as_str() {
+            "hevc" | "h265" => 0.55,  // AV1 uses ~55% of HEVC bitrate (45% reduction)
+            "h264" | "avc" => 0.40,   // AV1 uses ~40% of H.264 bitrate (60% reduction)
+            "vp9" => 0.85,            // AV1 uses ~85% of VP9 bitrate (15% reduction)
+            "av1" => 1.0,             // Already AV1, no savings
+            _ => 0.50,                // Conservative estimate for unknown codecs
+        };
+        
+        // Use source bitrate if available, otherwise use resolution-based estimation
+        let source_bitrate_mbps = bitrate_bps as f64 / 1_000_000.0;
+        let estimated_av1_bitrate_mbps = if source_bitrate_mbps > 0.0 {
+            // Use source bitrate adjusted by codec efficiency
+            source_bitrate_mbps * codec_efficiency_factor
+        } else {
+            // Fallback to resolution-based estimation
+            resolution_based_bitrate_mbps
+        };
+        
+        // Calculate duration from file size and bitrate
+        // Total bitrate includes video + audio + overhead
+        let estimated_audio_bitrate_mbps = 0.2; // 200 kbps average
+        let total_source_bitrate_mbps = if source_bitrate_mbps > 0.0 {
+            source_bitrate_mbps + estimated_audio_bitrate_mbps
+        } else {
+            // Estimate total bitrate from resolution if no source bitrate
+            resolution_based_bitrate_mbps * 2.0 + estimated_audio_bitrate_mbps
+        };
+        
+        // Calculate duration in seconds
+        let duration_seconds = (orig_bytes as f64 * 8.0) / (total_source_bitrate_mbps * 1_000_000.0);
+        
+        // Calculate estimated AV1 file size
+        // Estimated size = (video_bitrate + audio_bitrate) * duration / 8
+        let total_av1_bitrate_mbps = estimated_av1_bitrate_mbps + estimated_audio_bitrate_mbps;
+        let estimated_av1_bytes = (total_av1_bitrate_mbps * 1_000_000.0 * duration_seconds) / 8.0;
+        
+        // Ensure estimated size is reasonable (not larger than original)
+        let estimated_av1_bytes = estimated_av1_bytes.min(orig_bytes as f64 * 0.95);
+        
+        // Calculate savings
+        let estimated_savings_bytes = orig_bytes as f64 - estimated_av1_bytes;
+        
+        // Convert to GB (1 GB = 1,000,000,000 bytes)
+        return Some(estimated_savings_bytes / 1_000_000_000.0);
+    }
     
-    // Parse frame rate (format: "30/1" or "29.97")
-    let fps = parse_frame_rate(frame_rate_str).unwrap_or(30.0);
+    // Fallback: Use codec-based compression ratio if we have codec info
+    if let Some(codec) = job.video_codec.as_deref() {
+        let compression_ratio = match codec.to_lowercase().as_str() {
+            "hevc" | "h265" => 2.5,  // AV1 ~2.5x better than HEVC
+            "h264" | "avc" => 3.5,   // AV1 ~3.5x better than H.264
+            "vp9" => 1.2,            // AV1 ~1.2x better than VP9
+            "av1" => 1.0,            // Already AV1, no savings
+            _ => 2.0,                // Conservative estimate
+        };
+        
+        let estimated_output_bytes = orig_bytes as f64 / compression_ratio;
+        let estimated_savings_bytes = orig_bytes as f64 - estimated_output_bytes;
+        return Some(estimated_savings_bytes / 1_000_000_000.0);
+    }
     
-    // Calculate pixels per frame and total pixels per second
-    let pixels_per_frame = (width * height) as f64;
-    let pixels_per_second = pixels_per_frame * fps;
-    
-    // Estimate AV1 bitrate based on resolution and frame rate
-    // AV1 bitrate estimation formula based on resolution and frame rate
-    // Higher resolution and frame rate require more bitrate
-    // Base bitrate per megapixel-second for AV1 at reasonable quality
-    let base_bitrate_per_megapixel_sec = 0.5; // Mbps per megapixel-second (conservative)
-    let megapixels_per_second = pixels_per_second / 1_000_000.0;
-    let estimated_av1_bitrate_mbps = megapixels_per_second * base_bitrate_per_megapixel_sec;
-    
-    // Adjust based on source codec efficiency
-    // AV1 efficiency vs source codec (bitrate reduction factor)
-    let codec_efficiency_factor = match codec.to_lowercase().as_str() {
-        "hevc" | "h265" => 0.55,  // AV1 uses ~55% of HEVC bitrate (45% reduction)
-        "h264" | "avc" => 0.40,   // AV1 uses ~40% of H.264 bitrate (60% reduction)
-        "vp9" => 0.85,            // AV1 uses ~85% of VP9 bitrate (15% reduction)
-        "av1" => 1.0,             // Already AV1, no savings
-        _ => 0.50,                // Conservative estimate for unknown codecs
-    };
-    
-    // If we have source bitrate, use it for more accurate estimation
-    // Otherwise use resolution-based estimation
-    let source_bitrate_mbps = bitrate_bps as f64 / 1_000_000.0;
-    let estimated_av1_bitrate_mbps = if source_bitrate_mbps > 0.0 {
-        // Use source bitrate adjusted by codec efficiency
-        source_bitrate_mbps * codec_efficiency_factor
-    } else {
-        // Fallback to resolution-based estimation
-        estimated_av1_bitrate_mbps
-    };
-    
-    // Calculate duration from file size and bitrate
-    // Total bitrate includes video + audio + overhead
-    // Estimate audio bitrate (typically 128-256 kbps for most content)
-    let estimated_audio_bitrate_mbps = 0.2; // 200 kbps average
-    let total_source_bitrate_mbps = if source_bitrate_mbps > 0.0 {
-        source_bitrate_mbps + estimated_audio_bitrate_mbps
-    } else {
-        // If no source bitrate, estimate from file size
-        // duration = file_size_bytes * 8 / bitrate_bps
-        // We'll use a conservative estimate
-        estimated_av1_bitrate_mbps * 2.0 + estimated_audio_bitrate_mbps
-    };
-    
-    // Calculate duration in seconds
-    let duration_seconds = (orig_bytes as f64 * 8.0) / (total_source_bitrate_mbps * 1_000_000.0);
-    
-    // Calculate estimated AV1 file size
-    // Estimated size = (video_bitrate + audio_bitrate) * duration / 8
-    let total_av1_bitrate_mbps = estimated_av1_bitrate_mbps + estimated_audio_bitrate_mbps;
-    let estimated_av1_bytes = (total_av1_bitrate_mbps * 1_000_000.0 * duration_seconds) / 8.0;
-    
-    // Ensure estimated size is reasonable (not larger than original)
-    let estimated_av1_bytes = estimated_av1_bytes.min(orig_bytes as f64 * 0.95);
-    
-    // Calculate savings
-    let estimated_savings_bytes = orig_bytes as f64 - estimated_av1_bytes;
-    
-    // Convert to GB (1 GB = 1,000,000,000 bytes)
+    // Final fallback: Conservative 2.5:1 ratio if no metadata at all
+    let compression_ratio = 2.5;
+    let estimated_output_bytes = orig_bytes as f64 / compression_ratio;
+    let estimated_savings_bytes = orig_bytes as f64 - estimated_output_bytes;
     Some(estimated_savings_bytes / 1_000_000_000.0)
 }
 
