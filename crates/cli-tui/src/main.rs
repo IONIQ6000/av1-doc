@@ -80,8 +80,20 @@ impl App {
 fn main() -> Result<()> {
     let args = Args::parse();
     
-    // Load config (same logic as daemon)
-    let cfg = TranscodeConfig::load_config(args.config.as_deref())
+    // Load config - if no config specified, try default location first (same as daemon)
+    let config_path = if args.config.is_some() {
+        args.config.as_deref()
+    } else {
+        // Try default config location first
+        let default_path = PathBuf::from("/etc/av1d/config.json");
+        if default_path.exists() {
+            Some(default_path.as_path())
+        } else {
+            None
+        }
+    };
+    
+    let cfg = TranscodeConfig::load_config(config_path)
         .context("Failed to load configuration")?;
     
     eprintln!("TUI: Using job state directory: {}", cfg.job_state_dir.display());
