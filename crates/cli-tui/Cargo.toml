@@ -1,0 +1,20 @@
+[package]
+name = "cli-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "av1top"
+path = "src/main.rs"
+
+[dependencies]
+daemon = { path = "../daemon" }
+tokio.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+sysinfo.workspace = true
+humansize.workspace = true
+anyhow.workspace = true
+

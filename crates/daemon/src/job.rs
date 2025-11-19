@@ -1,0 +1,108 @@
+use std::path::{Path, PathBuf};
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::fs;
+
+/// Status of a transcoding job
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobStatus {
+    Pending,
+    Running,
+    Success,
+    Failed,
+    Skipped,
+}
+
+/// Represents a transcoding job
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Job {
+    /// Unique identifier for this job
+    pub id: String,
+    /// Path to the source media file
+    pub source_path: PathBuf,
+    /// Path to the output file (if completed)
+    pub output_path: Option<PathBuf>,
+    /// When the job was created
+    pub created_at: DateTime<Utc>,
+    /// When the job started processing
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the job finished (successfully or not)
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Current status of the job
+    pub status: JobStatus,
+    /// Reason for skip/failure (if applicable)
+    pub reason: Option<String>,
+    /// Original file size in bytes
+    pub original_bytes: Option<u64>,
+    /// New file size in bytes (after transcoding)
+    pub new_bytes: Option<u64>,
+    /// Whether the source was classified as web-like
+    pub is_web_like: bool,
+}
+
+impl Job {
+    /// Create a new pending job
+    pub fn new(source_path: PathBuf) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            source_path,
+            output_path: None,
+            created_at: Utc::now(),
+            started_at: None,
+            finished_at: None,
+            status: JobStatus::Pending,
+            reason: None,
+            original_bytes: None,
+            new_bytes: None,
+            is_web_like: false,
+        }
+    }
+}
+
+/// Save a job to disk as a JSON file
+pub fn save_job(job: &Job, dir: &Path) -> Result<()> {
+    // Ensure directory exists
+    fs::create_dir_all(dir)
+        .with_context(|| format!("Failed to create job state directory: {}", dir.display()))?;
+
+    let file_path = dir.join(format!("{}.json", job.id));
+    let json = serde_json::to_string_pretty(job)
+        .context("Failed to serialize job to JSON")?;
+
+    fs::write(&file_path, json)
+        .with_context(|| format!("Failed to write job file: {}", file_path.display()))?;
+
+    Ok(())
+}
+
+/// Load all jobs from the job state directory
+pub fn load_all_jobs(dir: &Path) -> Result<Vec<Job>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut jobs = Vec::new();
+
+    for entry in fs::read_dir(dir)
+        .with_context(|| format!("Failed to read job state directory: {}", dir.display()))?
+    {
+        let entry = entry.context("Failed to read directory entry")?;
+        let path = entry.path();
+
+        // Only process .json files
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            let content = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read job file: {}", path.display()))?;
+
+            let job: Job = serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse job JSON: {}", path.display()))?;
+
+            jobs.push(job);
+        }
+    }
+
+    Ok(jobs)
+}
+

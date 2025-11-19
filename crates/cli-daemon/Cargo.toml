@@ -1,0 +1,18 @@
+[package]
+name = "cli-daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "av1d"
+path = "src/main.rs"
+
+[dependencies]
+daemon = { path = "../daemon" }
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+
