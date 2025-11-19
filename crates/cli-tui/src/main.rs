@@ -50,13 +50,21 @@ impl App {
         // Reload jobs
         match load_all_jobs(&self.job_state_dir) {
             Ok(jobs) => {
+                eprintln!("DEBUG: Loaded {} jobs from {}", jobs.len(), self.job_state_dir.display());
                 self.jobs = jobs;
                 // Sort by creation time (newest first)
                 self.jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
             }
             Err(e) => {
                 // Log error but don't crash - show empty table
-                eprintln!("Warning: Failed to load jobs from {}: {}", self.job_state_dir.display(), e);
+                eprintln!("ERROR: Failed to load jobs from {}: {}", self.job_state_dir.display(), e);
+                eprintln!("DEBUG: Directory exists: {}", self.job_state_dir.exists());
+                if self.job_state_dir.exists() {
+                    if let Ok(entries) = std::fs::read_dir(&self.job_state_dir) {
+                        let count: usize = entries.count();
+                        eprintln!("DEBUG: Found {} files in directory", count);
+                    }
+                }
                 self.jobs = Vec::new();
             }
         }
@@ -209,7 +217,19 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
 
-    let rows: Vec<Row> = app.jobs
+    let rows: Vec<Row> = if app.jobs.is_empty() {
+        // Show a message when no jobs
+        vec![Row::new(vec![
+            "No jobs found".to_string(),
+            format!("(checking: {})", app.job_state_dir.display()),
+            "-".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+        ]).height(1)]
+    } else {
+        app.jobs
         .iter()
         .take(20) // Show top 20 jobs
         .map(|job| {
@@ -266,7 +286,8 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
             ])
             .height(1)
         })
-        .collect();
+        .collect()
+    };
 
     let widths = [
         Constraint::Length(10),
@@ -278,9 +299,15 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Percentage(20),
     ];
 
+    let title = if app.jobs.is_empty() {
+        format!("Jobs (0 found)")
+    } else {
+        format!("Jobs (showing {}/{})", app.jobs.len().min(20), app.jobs.len())
+    };
+    
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title("Jobs"));
+        .block(Block::default().borders(Borders::ALL).title(title));
 
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
