@@ -64,7 +64,12 @@ async fn main() -> Result<()> {
         let scan_results = scan::scan_library(&cfg).await
             .context("Failed to scan library")?;
 
-        info!("Scan completed: found {} files", scan_results.len());
+        info!("Scan completed: found {} results (candidates + skipped)", scan_results.len());
+        
+        let candidates_in_results: usize = scan_results.iter()
+            .filter(|r| matches!(r, scan::ScanResult::Candidate(_, _)))
+            .count();
+        info!("Scan found {} candidates ready for processing", candidates_in_results);
 
         // Create jobs for new candidates
         let existing_jobs = load_all_jobs(&cfg.job_state_dir)
