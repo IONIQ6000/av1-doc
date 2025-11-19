@@ -20,17 +20,56 @@ struct App {
     table_state: TableState,
     should_quit: bool,
     job_state_dir: PathBuf,
+    gpu_device_path: PathBuf,
 }
 
 impl App {
-    fn new(job_state_dir: PathBuf) -> Self {
+    fn new(job_state_dir: PathBuf, gpu_device_path: PathBuf) -> Self {
         Self {
             jobs: Vec::new(),
             system: System::new(),
             table_state: TableState::default(),
             should_quit: false,
             job_state_dir,
+            gpu_device_path,
         }
+    }
+    
+    fn get_gpu_usage(&self) -> f64 {
+        // Try to read GPU utilization from sysfs
+        // For Intel GPUs, check /sys/class/drm/card0/device/gpu_busy_percent
+        // Or try reading from /sys/kernel/debug/dri/0/i915_frequency_info
+        let paths = vec![
+            "/sys/class/drm/card0/device/gpu_busy_percent",
+            "/sys/class/drm/renderD128/device/gpu_busy_percent",
+            "/sys/kernel/debug/dri/0/i915_frequency_info",
+        ];
+        
+        for path_str in paths {
+            if let Ok(content) = std::fs::read_to_string(path_str) {
+                // Try to parse percentage from various formats
+                // Format 1: Just a number "45"
+                if let Ok(val) = content.trim().parse::<f64>() {
+                    return val.min(100.0).max(0.0);
+                }
+                
+                // Format 2: "GPU freq: 800 MHz, GPU busy: 45%"
+                for line in content.lines() {
+                    if let Some(percent_pos) = line.find("busy:") {
+                        let after_busy = &line[percent_pos + 5..];
+                        if let Some(pct_pos) = after_busy.find('%') {
+                            let num_str = &after_busy[..pct_pos].trim();
+                            if let Ok(val) = num_str.parse::<f64>() {
+                                return val.min(100.0).max(0.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Fallback: return 0 if we can't read GPU usage
+        0.0
     }
 
     fn refresh(&mut self) -> Result<()> {
@@ -85,7 +124,7 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let mut app = App::new(cfg.job_state_dir.clone());
+    let mut app = App::new(cfg.job_state_dir.clone(), cfg.gpu_device.clone());
 
     // Main event loop
     loop {
@@ -180,10 +219,14 @@ fn ui(f: &mut Frame, app: &mut App) {
 }
 
 fn render_top_bar(f: &mut Frame, app: &App, area: Rect) {
-    // Split top bar into two equal halves for CPU and Memory
+    // Split top bar into three equal parts for CPU, Memory, and GPU
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+        ])
         .split(area);
 
     // Get CPU usage and clamp to 0-100 range
@@ -225,6 +268,16 @@ fn render_top_bar(f: &mut Frame, app: &App, area: Rect) {
         .percent(memory_percent_u16)
         .label(format!("{:.1}%", memory_percent));
     f.render_widget(memory_gauge, chunks[1]);
+
+    // GPU gauge
+    let gpu_usage = app.get_gpu_usage();
+    let gpu_percent_u16 = gpu_usage.min(100.0).max(0.0) as u16;
+    let gpu_gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).title("GPU"))
+        .gauge_style(Style::default().fg(Color::Magenta))
+        .percent(gpu_percent_u16)
+        .label(format!("{:.1}%", gpu_usage));
+    f.render_widget(gpu_gauge, chunks[2]);
 }
 
 fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
