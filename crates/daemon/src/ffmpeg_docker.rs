@@ -145,16 +145,16 @@ pub async fn run_av1_vaapi_job(
     // Output file
     ffmpeg_args.push(container_output.clone());
 
-    // Append ffmpeg args to docker command
-    for arg in ffmpeg_args {
-        cmd.arg(arg);
-    }
-
-    // Log the full command for debugging
+    // Log the full command for debugging (before moving ffmpeg_args)
     use log::debug;
     debug!("ffmpeg docker command: docker run --rm --privileged --device {}:{} -v {}:/config {} ffmpeg [args...]",
            cfg.gpu_device.display(), cfg.gpu_device.display(), parent_dir.display(), cfg.docker_image);
     debug!("ffmpeg args: {:?}", ffmpeg_args);
+
+    // Append ffmpeg args to docker command
+    for arg in ffmpeg_args {
+        cmd.arg(arg);
+    }
 
     // Execute docker command
     let output = cmd
