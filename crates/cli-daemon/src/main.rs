@@ -268,7 +268,24 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         // Save job immediately after extracting metadata so TUI can use it
         info!("Job {}: Saving job with metadata...", job.id);
         match save_job(job, &cfg.job_state_dir) {
-            Ok(()) => info!("Job {}: ✅ Job saved successfully with metadata", job.id),
+            Ok(()) => {
+                info!("Job {}: ✅ Job saved successfully with metadata", job.id);
+                // Verify the save worked by checking if we can read it back
+                if let Ok(verify_job) = job::load_all_jobs(&cfg.job_state_dir) {
+                    if let Some(saved_job) = verify_job.iter().find(|j| j.id == job.id) {
+                        let has_meta = saved_job.video_codec.is_some() 
+                            && saved_job.video_width.is_some() 
+                            && saved_job.video_height.is_some()
+                            && saved_job.video_bitrate.is_some()
+                            && saved_job.video_frame_rate.is_some();
+                        if has_meta {
+                            info!("Job {}: ✅ Verified - metadata is saved in job file", job.id);
+                        } else {
+                            warn!("Job {}: ⚠️  WARNING - metadata not found in saved job file!", job.id);
+                        }
+                    }
+                }
+            },
             Err(e) => error!("Job {}: ❌ Failed to save job: {}", job.id, e),
         }
     } else {
