@@ -233,6 +233,18 @@ fn render_system_metrics(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
+    // Ensure we don't render outside the allocated area
+    if area.height < 3 {
+        // Area too small, show error
+        let error_msg = Paragraph::new("Not enough space for job table")
+            .block(Block::default().borders(Borders::ALL));
+        f.render_widget(error_msg, area);
+        return;
+    }
+    
+    // Calculate how many rows we can fit (header + border = 2 lines, so area.height - 2)
+    let max_rows = (area.height as usize).saturating_sub(2);
+    
     let header = Row::new(vec![
         "STATUS",
         "FILE",
@@ -259,7 +271,7 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         app.jobs
         .iter()
-        .take(20) // Show top 20 jobs
+        .take(max_rows.min(20)) // Limit to available space or 20, whichever is smaller
         .map(|job| {
             let status_str = match job.status {
                 JobStatus::Pending => "PENDING",
@@ -360,6 +372,7 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
         .block(Block::default().borders(Borders::ALL).title(title))
         .column_spacing(1);
 
+    // Render table within the allocated area
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
 
