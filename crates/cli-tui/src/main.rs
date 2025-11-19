@@ -95,7 +95,38 @@ impl App {
             }
         }
         
-        // Method 2: Try using intel_gpu_top if available
+        // Method 2: Try reading from /sys/class/drm/card*/gt/rc6_residency_ms
+        // This can give us an indication of GPU activity
+        for &card_num in &card_nums {
+            for gt_num in 0..4 {
+                // Try reading RC6 residency - if GPU is in RC6 (low power), it's less busy
+                let rc6_path = format!("/sys/class/drm/card{}/gt{}/rc6_residency_ms", card_num, gt_num);
+                if let Ok(rc6_content) = std::fs::read_to_string(&rc6_path) {
+                    // RC6 residency is a percentage (0-100) of time in low power state
+                    // GPU busy = 100 - RC6 residency
+                    if let Ok(rc6_pct) = rc6_content.trim().parse::<f64>() {
+                        let busy_pct = 100.0 - rc6_pct;
+                        return busy_pct.min(100.0).max(0.0);
+                    }
+                }
+            }
+        }
+        
+        // Method 3: Try reading from /sys/class/drm/card*/gt/freq_factor
+        // This shows current frequency vs max frequency
+        for &card_num in &card_nums {
+            for gt_num in 0..4 {
+                let freq_factor_path = format!("/sys/class/drm/card{}/gt{}/freq_factor", card_num, gt_num);
+                if let Ok(freq_content) = std::fs::read_to_string(&freq_factor_path) {
+                    // freq_factor is 0-100, represents frequency utilization
+                    if let Ok(freq_factor) = freq_content.trim().parse::<f64>() {
+                        return freq_factor.min(100.0).max(0.0);
+                    }
+                }
+            }
+        }
+        
+        // Method 4: Try using intel_gpu_top if available (may fail due to PMU permissions)
         // Run: intel_gpu_top -l 1 -n 1 and parse output
         if let Ok(output) = Command::new("intel_gpu_top")
             .args(&["-l", "1", "-n", "1"])
