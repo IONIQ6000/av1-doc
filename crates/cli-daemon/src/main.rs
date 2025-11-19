@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use daemon::{
-    config::TranscodeConfig, job::{Job, JobStatus, load_all_jobs, save_job},
+    config::TranscodeConfig, 
+    job::{self, Job, JobStatus, load_all_jobs, save_job},
     scan, ffprobe, classifier, ffmpeg_docker, sidecar,
 };
 use std::path::PathBuf;
