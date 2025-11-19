@@ -259,14 +259,15 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
         0
     };
     
+    // Use shorter header names to save space
     let header = Row::new(vec![
-        "STATUS",
-        "FILE",
-        "ORIG SIZE",
-        "NEW SIZE",
-        "SAVINGS",
-        "DURATION",
-        "REASON",
+        "ST",      // STATUS
+        "FILE",    // FILE
+        "ORIG",    // ORIG SIZE
+        "NEW",     // NEW SIZE
+        "SAVE",    // SAVINGS
+        "TIME",    // DURATION
+        "REASON",  // REASON
     ])
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
@@ -288,21 +289,23 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
             .iter()
             .take(num_rows)
             .map(|job| {
+                // Use shorter status strings to save space
                 let status_str = match job.status {
-                    JobStatus::Pending => "PENDING",
-                    JobStatus::Running => "RUNNING",
-                    JobStatus::Success => "SUCCESS",
-                    JobStatus::Failed => "FAILED",
-                    JobStatus::Skipped => "SKIPPED",
+                    JobStatus::Pending => "PEND",
+                    JobStatus::Running => "RUN",
+                    JobStatus::Success => "OK",
+                    JobStatus::Failed => "FAIL",
+                    JobStatus::Skipped => "SKIP",
                 };
 
-                // Truncate filename
+                // Truncate filename more aggressively to fit better
                 let file_name = job.source_path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("?")
                     .to_string();
-                let file_name = truncate_string(&file_name, 35);
+                // Truncate based on available width - will be handled by column constraint
+                let file_name = truncate_string(&file_name, 50);
 
                 let orig_size = job.original_bytes
                     .map(|b| format_size(b, DECIMAL))
@@ -330,7 +333,8 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
                     "-".to_string()
                 };
 
-                let reason = truncate_string(job.reason.as_deref().unwrap_or("-"), 25);
+                // Truncate reason more aggressively
+                let reason = truncate_string(job.reason.as_deref().unwrap_or("-"), 30);
 
                 Row::new(vec![
                     status_str.to_string(),
@@ -346,27 +350,30 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
             .collect()
     };
 
-    // Column widths - use fixed sizes for most, flexible for file and reason
+    // Column widths - optimize for space efficiency
+    // Use Percentage for flexible columns to fill available width
     let widths = [
-        Constraint::Length(9),   // STATUS
-        Constraint::Min(20),     // FILE (flexible)
-        Constraint::Length(10),  // ORIG SIZE
-        Constraint::Length(10),  // NEW SIZE
-        Constraint::Length(9),   // SAVINGS
-        Constraint::Length(9),   // DURATION
-        Constraint::Min(15),     // REASON (flexible)
+        Constraint::Length(5),        // ST (PEND/RUN/etc - shorter now)
+        Constraint::Percentage(40),    // FILE (largest flexible column)
+        Constraint::Length(9),        // ORIG SIZE
+        Constraint::Length(9),        // NEW SIZE
+        Constraint::Length(7),        // SAVE
+        Constraint::Length(6),        // TIME
+        Constraint::Percentage(24),   // REASON (flexible, remaining space)
     ];
 
     let title = if app.jobs.is_empty() {
         "Jobs (0 found)".to_string()
     } else {
-        format!("Jobs ({}/{})", rows.len().saturating_sub(1), app.jobs.len())
+        format!("Jobs ({}/{})", rows.len().saturating_sub(if app.jobs.is_empty() { 0 } else { 1 }), app.jobs.len())
     };
     
+    // Use minimal spacing and compact borders
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .column_spacing(1);
+        .column_spacing(1)
+        .widths(widths);
 
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
