@@ -153,7 +153,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // System metrics
-            Constraint::Min(10),   // Job table
+            Constraint::Min(5),    // Job table (minimum 5 lines)
             Constraint::Length(3), // Status bar
         ])
         .split(f.size());
@@ -231,8 +231,8 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
     let rows: Vec<Row> = if app.jobs.is_empty() {
         // Show a message when no jobs
         vec![Row::new(vec![
-            "No jobs found".to_string(),
-            format!("(checking: {})", app.job_state_dir.display()),
+            "No jobs".to_string(),
+            format!("Dir: {}", app.job_state_dir.display()),
             "-".to_string(),
             "-".to_string(),
             "-".to_string(),
@@ -252,11 +252,17 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
                 JobStatus::Skipped => "SKIPPED",
             };
 
+            // Truncate filename to prevent overflow
             let file_name = job.source_path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("?")
                 .to_string();
+            let file_name = if file_name.len() > 40 {
+                format!("{}...", &file_name[..37])
+            } else {
+                file_name
+            };
 
             let orig_size = job.original_bytes
                 .map(|b| format_size(b, DECIMAL))
@@ -284,7 +290,13 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
                 "-".to_string()
             };
 
-            let reason = job.reason.as_deref().unwrap_or("-").to_string();
+            // Truncate reason to prevent overflow
+            let reason = job.reason.as_deref().unwrap_or("-");
+            let reason = if reason.len() > 30 {
+                format!("{}...", &reason[..27])
+            } else {
+                reason.to_string()
+            };
 
             Row::new(vec![
                 status_str.to_string(),
@@ -300,14 +312,15 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
         .collect()
     };
 
+    // Use fixed widths that add up properly and prevent overflow
     let widths = [
-        Constraint::Length(10),
-        Constraint::Percentage(30),
-        Constraint::Length(12),
-        Constraint::Length(12),
-        Constraint::Length(12),
-        Constraint::Length(10),
-        Constraint::Percentage(20),
+        Constraint::Length(10),  // STATUS
+        Constraint::Min(20),     // FILE (flexible, min 20)
+        Constraint::Length(11),  // ORIG SIZE
+        Constraint::Length(11),  // NEW SIZE
+        Constraint::Length(10),  // SAVINGS %
+        Constraint::Length(9),   // DURATION
+        Constraint::Min(15),      // REASON (flexible, min 15)
     ];
 
     let title = if app.jobs.is_empty() {
@@ -318,7 +331,8 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
     
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(title));
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .column_spacing(1);
 
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
@@ -328,14 +342,44 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let running = app.count_by_status(JobStatus::Running);
     let failed = app.count_by_status(JobStatus::Failed);
     let skipped = app.count_by_status(JobStatus::Skipped);
+    let pending = app.count_by_status(JobStatus::Pending);
+    let success = app.count_by_status(JobStatus::Success);
+
+    // Truncate directory path if too long
+    let dir_display = app.job_state_dir.display().to_string();
+    let dir_short = if dir_display.len() > 40 {
+        format!("...{}", &dir_display[dir_display.len() - 37..])
+    } else {
+        dir_display
+    };
 
     let text = Line::from(vec![
         Span::styled(
-            format!("Total: {} | Running: {} | Failed: {} | Skipped: {} | ", total, running, failed, skipped),
+            format!("Total: {} | ", total),
             Style::default(),
         ),
         Span::styled(
-            format!("State: {} | ", app.job_state_dir.display()),
+            format!("Running: {} | ", running),
+            Style::default().fg(Color::Green),
+        ),
+        Span::styled(
+            format!("Pending: {} | ", pending),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::styled(
+            format!("Success: {} | ", success),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(
+            format!("Failed: {} | ", failed),
+            Style::default().fg(Color::Red),
+        ),
+        Span::styled(
+            format!("Skipped: {} | ", skipped),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::styled(
+            format!("Dir: {} | ", dir_short),
             Style::default().fg(Color::Yellow),
         ),
         Span::styled(
@@ -345,7 +389,8 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     ]);
 
     let paragraph = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title("Status"));
+        .block(Block::default().borders(Borders::ALL).title("Status"))
+        .wrap(ratatui::widgets::Wrap { trim: true });
     f.render_widget(paragraph, area);
 }
 
