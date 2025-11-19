@@ -106,6 +106,9 @@ install_docker() {
         # Enable Docker to start on boot
         systemctl enable docker
         
+        # Check for containerd version issue (LXC compatibility)
+        check_containerd_version
+        
         return
     fi
     
@@ -124,7 +127,26 @@ install_docker() {
     
     # Install Docker
     apt-get update
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    
+    # Check if running in LXC and install compatible containerd version
+    if [ -f /proc/1/environ ] && grep -q "container=lxc" /proc/1/environ 2>/dev/null; then
+        log_warn "Detected LXC container - installing compatible containerd version"
+        # Try to install older containerd version that works with LXC
+        apt-get install -y docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin
+        # Check if containerd.io 1.7.28-1 is available
+        if apt-cache show containerd.io | grep -q "1.7.28-1"; then
+            log_info "Installing containerd.io 1.7.28-1 (LXC compatible)"
+            apt-get install -y containerd.io=1.7.28-1~debian.13~trixie || \
+            apt-get install -y containerd.io=1.7.28-1
+            apt-mark hold containerd.io
+            log_info "containerd.io held at compatible version"
+        else
+            log_warn "Compatible containerd.io version not found, installing latest"
+            apt-get install -y containerd.io
+        fi
+    else
+        apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    fi
     
     # Start and enable Docker service
     systemctl enable docker
@@ -158,6 +180,21 @@ install_docker() {
     fi
     
     log_info "Docker installed and verified"
+}
+
+# Check containerd version for LXC compatibility
+check_containerd_version() {
+    if [ -f /proc/1/environ ] && grep -q "container=lxc" /proc/1/environ 2>/dev/null; then
+        log_info "Detected LXC container - checking containerd version"
+        local containerd_version=$(dpkg -l | grep containerd.io | awk '{print $3}')
+        if echo "$containerd_version" | grep -qE "1\.7\.28-[2-9]|1\.7\.2[9-9]|1\.8\."; then
+            log_warn "containerd.io version $containerd_version may have LXC compatibility issues"
+            log_warn "If you see sysctl permission errors, consider downgrading:"
+            log_warn "  apt install containerd.io=1.7.28-1~debian.13~trixie"
+            log_warn "  apt-mark hold containerd.io"
+            log_warn "  systemctl restart containerd docker"
+        fi
+    fi
 }
 
 # Build the project
