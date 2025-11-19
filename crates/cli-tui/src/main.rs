@@ -5,7 +5,6 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
     widgets::{Block, Borders, Gauge, Paragraph, Row, Table, TableState},
     Frame, Terminal,
 };
