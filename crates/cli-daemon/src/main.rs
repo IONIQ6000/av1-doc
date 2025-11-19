@@ -228,8 +228,27 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
             }
         }
         
-        info!("Job {}: Video metadata - codec: {:?}, resolution: {:?}x{:?}, bitrate: {:?} bps, fps: {:?}", 
-              job.id, job.video_codec, job.video_width, job.video_height, job.video_bitrate, job.video_frame_rate);
+        // Validate all required metadata is present for estimation
+        let has_codec = job.video_codec.is_some();
+        let has_width = job.video_width.is_some();
+        let has_height = job.video_height.is_some();
+        let has_bitrate = job.video_bitrate.is_some();
+        let has_fps = job.video_frame_rate.is_some();
+        
+        if has_codec && has_width && has_height && has_bitrate && has_fps {
+            info!("Job {}: Video metadata complete - codec: {:?}, resolution: {:?}x{:?}, bitrate: {:?} bps, fps: {:?} (estimation will work)", 
+                  job.id, job.video_codec, job.video_width, job.video_height, job.video_bitrate, job.video_frame_rate);
+        } else {
+            warn!("Job {}: Video metadata incomplete - codec: {}, width: {}, height: {}, bitrate: {}, fps: {} (estimation will NOT work)", 
+                  job.id, has_codec, has_width, has_height, has_bitrate, has_fps);
+            warn!("Job {}: Missing fields - codec: {:?}, width: {:?}, height: {:?}, bitrate: {:?}, fps: {:?}", 
+                  job.id, job.video_codec, job.video_width, job.video_height, job.video_bitrate, job.video_frame_rate);
+        }
+        
+        // Save job immediately after extracting metadata so TUI can use it
+        save_job(job, &cfg.job_state_dir)?;
+    } else {
+        warn!("Job {}: No video stream found - cannot extract metadata for estimation", job.id);
     }
 
     // Step 4: Classify source

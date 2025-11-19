@@ -15,6 +15,16 @@ use std::time::Duration;
 use sysinfo::System;
 use humansize::{format_size, DECIMAL};
 
+/// Validate that job has all required metadata for estimation
+fn has_estimation_metadata(job: &Job) -> bool {
+    job.original_bytes.is_some()
+        && job.video_codec.is_some()
+        && job.video_width.is_some()
+        && job.video_height.is_some()
+        && job.video_bitrate.is_some()
+        && job.video_frame_rate.is_some()
+}
+
 /// Estimate space savings in GB for AV1 transcoding based on video properties
 /// Uses bitrate estimation considering resolution, frame rate, and source codec efficiency
 /// Returns None if required metadata is not available
@@ -499,10 +509,14 @@ fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
             }
         } else {
             // Estimate savings if not yet transcoded
-            if let Some(savings_gb) = estimate_space_savings_gb(job) {
-                format!("~{:.1}GB", savings_gb)
+            if has_estimation_metadata(job) {
+                if let Some(savings_gb) = estimate_space_savings_gb(job) {
+                    format!("~{:.1}GB", savings_gb)
+                } else {
+                    "calc?".to_string() // Calculation failed despite having metadata
+                }
             } else {
-                "-".to_string()
+                "-".to_string() // Missing metadata
             }
         };
         
@@ -689,10 +703,14 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
                     }
                 } else {
                     // Estimate savings if not yet transcoded
-                    if let Some(savings_gb) = estimate_space_savings_gb(job) {
-                        format!("~{:.1}GB", savings_gb)
+                    if has_estimation_metadata(job) {
+                        if let Some(savings_gb) = estimate_space_savings_gb(job) {
+                            format!("~{:.1}GB", savings_gb)
+                        } else {
+                            "calc?".to_string() // Calculation failed despite having metadata
+                        }
                     } else {
-                        "-".to_string()
+                        "-".to_string() // Missing metadata
                     }
                 };
 
