@@ -299,44 +299,97 @@ fn ui(f: &mut Frame, app: &mut App) {
     let size = f.size();
     
     // Check minimum terminal size
-    if size.height < 10 || size.width < 80 {
-        let error_msg = Paragraph::new("Terminal too small! Please resize to at least 80x10.")
+    if size.height < 12 || size.width < 80 {
+        let error_msg = Paragraph::new("Terminal too small! Please resize to at least 80x12.")
             .block(Block::default().borders(Borders::ALL).title("Error"))
             .style(Style::default().fg(Color::Red));
         f.render_widget(error_msg, size);
         return;
     }
     
+    // Check if there's a running job
+    let running_job = app.jobs.iter().find(|j| j.status == JobStatus::Running);
+    
     // Create vertical layout with explicit constraints
     // Use exact calculations to prevent overlap
     let top_height = 3;
+    let current_job_height = if running_job.is_some() { 4 } else { 0 };
     let bottom_height = 3;
-    let available_height = size.height.saturating_sub(top_height + bottom_height);
+    let available_height = size.height.saturating_sub(top_height + current_job_height + bottom_height);
     
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(top_height),      // Top bar: CPU/Memory (exactly 3 lines)
-            Constraint::Length(available_height), // Middle: Job table (exact remaining space)
-            Constraint::Length(bottom_height),    // Bottom: Status bar (exactly 3 lines)
+            Constraint::Length(top_height),           // Top bar: CPU/Memory/GPU
+            Constraint::Length(current_job_height),  // Current job info (if running)
+            Constraint::Length(available_height),     // Middle: Job table
+            Constraint::Length(bottom_height),        // Bottom: Status bar
         ])
         .split(size);
     
     // Verify chunks don't overlap
-    if main_chunks.len() >= 3 {
-        // Render each section in its allocated area - ensure we don't exceed bounds
-        if main_chunks[0].y + main_chunks[0].height <= size.height {
-            render_top_bar(f, app, main_chunks[0]);
+    if main_chunks.len() >= 4 {
+        let mut chunk_idx = 0;
+        
+        // Render top bar
+        if chunk_idx < main_chunks.len() {
+            render_top_bar(f, app, main_chunks[chunk_idx]);
+            chunk_idx += 1;
         }
         
-        if main_chunks[1].y >= main_chunks[0].y + main_chunks[0].height && 
-           main_chunks[1].y + main_chunks[1].height <= main_chunks[2].y {
-            render_job_table(f, app, main_chunks[1]);
+        // Render current job if running
+        if running_job.is_some() && chunk_idx < main_chunks.len() {
+            render_current_job(f, app, main_chunks[chunk_idx]);
+            chunk_idx += 1;
         }
         
-        if main_chunks[2].y >= main_chunks[1].y + main_chunks[1].height {
-            render_status_bar(f, app, main_chunks[2]);
+        // Render job table
+        if chunk_idx < main_chunks.len() {
+            render_job_table(f, app, main_chunks[chunk_idx]);
+            chunk_idx += 1;
         }
+        
+        // Render status bar
+        if chunk_idx < main_chunks.len() {
+            render_status_bar(f, app, main_chunks[chunk_idx]);
+        }
+    }
+}
+
+fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
+    if let Some(job) = app.jobs.iter().find(|j| j.status == JobStatus::Running) {
+        let file_name = job.source_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+        
+        let elapsed = if let Some(started) = job.started_at {
+            let dur = chrono::Utc::now() - started;
+            format!("{}s", dur.num_seconds())
+        } else {
+            "-".to_string()
+        };
+        
+        let orig_size = job.original_bytes
+            .map(|b| format_size(b, DECIMAL))
+            .unwrap_or_else(|| "-".to_string());
+        
+        let info_text = format!(
+            "Transcoding: {} | Size: {} | Elapsed: {}",
+            truncate_string(&file_name, 60),
+            orig_size,
+            elapsed
+        );
+        
+        let paragraph = Paragraph::new(info_text)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title("▶ CURRENT JOB")
+                .style(Style::default().fg(Color::Green)))
+            .style(Style::default().fg(Color::Yellow));
+        
+        f.render_widget(paragraph, area);
     }
 }
 
