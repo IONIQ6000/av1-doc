@@ -61,12 +61,12 @@ pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFPro
     let container_path = format!("/config/{}", basename);
 
     // Build docker command
-    // Note: Using --security-opt seccomp=unconfined to avoid sysctl permission issues in LXC
+    // Note: Using --privileged flag required when Docker runs inside LXC containers
+    // This is necessary for the linuxserver/ffmpeg image to set sysctls
     let mut cmd = Command::new(&cfg.docker_bin);
     cmd.arg("run")
         .arg("--rm")
-        .arg("--security-opt")
-        .arg("seccomp=unconfined")
+        .arg("--privileged")
         .arg("--device")
         .arg(format!("{}:{}", cfg.gpu_device.display(), cfg.gpu_device.display()))
         .arg("-v")
