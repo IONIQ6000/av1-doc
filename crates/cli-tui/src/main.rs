@@ -46,17 +46,6 @@ fn estimate_space_savings_gb(job: &Job) -> Option<f64> {
     // Parse frame rate (format: "30/1" or "29.97")
     let fps = parse_frame_rate(frame_rate_str)?;
     
-    // Calculate pixels per frame and total pixels per second
-    let pixels_per_frame = (width * height) as f64;
-    let pixels_per_second = pixels_per_frame * fps;
-    
-    // Estimate AV1 bitrate based on resolution and frame rate
-    // Base bitrate per megapixel-second for AV1 at reasonable quality
-    // This is derived from AV1 encoding guidelines and typical bitrate requirements
-    let base_bitrate_per_megapixel_sec = 0.5; // Mbps per megapixel-second
-    let megapixels_per_second = pixels_per_second / 1_000_000.0;
-    let resolution_based_bitrate_mbps = megapixels_per_second * base_bitrate_per_megapixel_sec;
-    
     // Adjust based on source codec efficiency
     // AV1 efficiency vs source codec (bitrate reduction factor)
     // Based on real-world AV1 encoding studies and benchmarks
