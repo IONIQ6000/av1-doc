@@ -126,29 +126,48 @@ fn ui(f: &mut Frame, app: &mut App) {
 }
 
 fn render_system_metrics(f: &mut Frame, app: &App, area: Rect) {
-    let cpu_usage = app.system.global_cpu_usage() * 100.0;
+    // Get CPU usage and clamp to 0-100 range
+    let cpu_raw = app.system.global_cpu_usage();
+    let cpu_usage = if cpu_raw.is_nan() || cpu_raw.is_infinite() {
+        0.0
+    } else {
+        cpu_raw.min(100.0).max(0.0)
+    };
+
+    // Get memory usage and clamp to 0-100 range
     let total_memory = app.system.total_memory();
     let used_memory = app.system.used_memory();
-    let memory_percent = (used_memory as f64 / total_memory as f64) * 100.0;
+    let memory_percent = if total_memory == 0 {
+        0.0
+    } else {
+        let percent = (used_memory as f64 / total_memory as f64) * 100.0;
+        if percent.is_nan() || percent.is_infinite() {
+            0.0
+        } else {
+            percent.min(100.0).max(0.0)
+        }
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    // CPU gauge
+    // CPU gauge - ensure value is in valid range
+    let cpu_percent_u16 = cpu_usage.min(100.0).max(0.0) as u16;
     let cpu_gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title("CPU"))
         .gauge_style(Style::default().fg(Color::Cyan))
-        .percent(cpu_usage as u16)
+        .percent(cpu_percent_u16)
         .label(format!("{:.1}%", cpu_usage));
     f.render_widget(cpu_gauge, chunks[0]);
 
-    // Memory gauge
+    // Memory gauge - ensure value is in valid range
+    let memory_percent_u16 = memory_percent.min(100.0).max(0.0) as u16;
     let memory_gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title("Memory"))
         .gauge_style(Style::default().fg(Color::Green))
-        .percent(memory_percent as u16)
+        .percent(memory_percent_u16)
         .label(format!("{:.1}%", memory_percent));
     f.render_widget(memory_gauge, chunks[1]);
 }
