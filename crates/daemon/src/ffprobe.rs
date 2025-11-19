@@ -86,16 +86,19 @@ pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFPro
         .arg("--device")
         .arg(format!("{}:{}", cfg.gpu_device.display(), cfg.gpu_device.display()))
         .arg("-v")
-        .arg(format!("{}:/config:ro", parent_dir.display())) // Add :ro for read-only
+        .arg(format!("{}:/config:ro", parent_dir.display()))
         .arg(&cfg.docker_image)
         .arg("ffprobe")
         .arg("-v")
-        .arg("error") // Change from "quiet" to "error" to see errors
+        .arg("error")
         .arg("-print_format")
         .arg("json")
         .arg("-show_streams")
         .arg("-show_format")
         .arg(&container_path);
+    
+    debug!("ffprobe command: docker run --rm --privileged --device {}:{} -v {}:/config:ro {} ffprobe -v error -print_format json -show_streams -show_format {}",
+           cfg.gpu_device.display(), cfg.gpu_device.display(), parent_dir.display(), cfg.docker_image, container_path);
 
     // Execute and capture output
     let output = cmd
