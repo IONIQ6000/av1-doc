@@ -40,13 +40,13 @@ pub async fn run_av1_vaapi_job(
 
     // Build docker command base
     // Note: Using --privileged flag required when Docker runs inside LXC containers
-    // This is necessary for the linuxserver/ffmpeg image to set sysctls and access GPU
+    // Mount /dev/dri as a volume for VAAPI access (better than --device for DRI)
     let mut cmd = Command::new(&cfg.docker_bin);
     cmd.arg("run")
         .arg("--rm")
         .arg("--privileged")
-        .arg("--device")
-        .arg(format!("{}:{}", cfg.gpu_device.display(), cfg.gpu_device.display()))
+        .arg("-v")
+        .arg("/dev/dri:/dev/dri")
         .arg("-v")
         .arg(format!("{}:/config", parent_dir.display()))
         .arg(&cfg.docker_image);
@@ -60,10 +60,13 @@ pub async fn run_av1_vaapi_job(
     ffmpeg_args.push("-y".to_string());
 
     // VAAPI hardware acceleration setup
+    // Use auto-detection by specifying just "vaapi=va" - it will find renderD128 automatically
     ffmpeg_args.push("-init_hw_device".to_string());
-    ffmpeg_args.push("vaapi=va:/dev/dri/renderD128".to_string());
+    ffmpeg_args.push("vaapi=va".to_string());
     ffmpeg_args.push("-hwaccel".to_string());
     ffmpeg_args.push("vaapi".to_string());
+    ffmpeg_args.push("-hwaccel_device".to_string());
+    ffmpeg_args.push("/dev/dri/renderD128".to_string());
     ffmpeg_args.push("-hwaccel_output_format".to_string());
     ffmpeg_args.push("vaapi".to_string());
 
