@@ -112,60 +112,70 @@ pub async fn scan_library(cfg: &TranscodeConfig) -> Result<Vec<ScanResult>> {
             candidates_to_check.push((path, size));
         }
         
-        info!("Found {} candidates requiring stability check", candidates_to_check.len());
+        let total_candidates = candidates_to_check.len();
+        info!("Found {} candidates requiring stability check", total_candidates);
         
-        // Check stability in parallel batches
-        // Process in batches of 32 (one per CPU core) to maximize parallelism
-        const BATCH_SIZE: usize = 32;
-        for batch in candidates_to_check.chunks(BATCH_SIZE) {
-            let mut stability_tasks = Vec::new();
-            
-            for (path, size) in batch {
-                let path_clone = path.clone();
-                let size_clone = *size;
-                
-                // Spawn async task to check stability
-                let task = tokio::spawn(async move {
-                    let size0 = size_clone;
-                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                    
-                    match std::fs::metadata(&path_clone) {
-                        Ok(metadata) => {
-                            let size1 = metadata.len();
-                            if size1 != size0 {
-                                Some(ScanResult::Skipped(
-                                    path_clone,
-                                    "file still copying".to_string(),
-                                ))
-                            } else {
-                                Some(ScanResult::Candidate(path_clone, size1))
-                            }
-                        }
-                        Err(_) => None, // File disappeared, skip it
-                    }
-                });
-                
-                stability_tasks.push(task);
-            }
-            
-            // Wait for all stability checks in this batch to complete
-            for task in stability_tasks {
-                if let Ok(Some(result)) = task.await {
-                    match &result {
-                        ScanResult::Candidate(path, size) => {
-                            info!("Found candidate: {} ({} bytes)", path.display(), size);
-                        }
-                        ScanResult::Skipped(path, reason) => {
-                            debug!("Skipped {}: {}", path.display(), reason);
-                            sidecar::write_why_txt(path, reason).ok();
-                        }
-                    }
-                    results.push(result);
-                }
-            }
-            
-            info!("Completed stability check batch: {} files checked in parallel", batch.len());
+        if total_candidates == 0 {
+            continue;
         }
+        
+        // Check stability for ALL files in parallel (not sequential batches!)
+        // Spawn all stability check tasks at once
+        let mut all_stability_tasks = Vec::new();
+        
+        for (path, size) in candidates_to_check {
+            let path_clone = path.clone();
+            let size_clone = size;
+            
+            // Spawn async task to check stability - ALL tasks run concurrently
+            let task = tokio::spawn(async move {
+                let size0 = size_clone;
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                
+                match std::fs::metadata(&path_clone) {
+                    Ok(metadata) => {
+                        let size1 = metadata.len();
+                        if size1 != size0 {
+                            Some(ScanResult::Skipped(
+                                path_clone,
+                                "file still copying".to_string(),
+                            ))
+                        } else {
+                            Some(ScanResult::Candidate(path_clone, size1))
+                        }
+                    }
+                    Err(_) => None, // File disappeared, skip it
+                }
+            });
+            
+            all_stability_tasks.push(task);
+        }
+        
+        info!("Started {} parallel stability checks (all running simultaneously)", all_stability_tasks.len());
+        
+        // Wait for all stability checks to complete (they're all running in parallel)
+        let mut completed = 0;
+        for task in all_stability_tasks {
+            if let Ok(Some(result)) = task.await {
+                completed += 1;
+                if completed % 32 == 0 {
+                    info!("Stability checks progress: {}/{} completed", completed, total_candidates);
+                }
+                
+                match &result {
+                    ScanResult::Candidate(path, size) => {
+                        info!("Found candidate: {} ({} bytes)", path.display(), size);
+                    }
+                    ScanResult::Skipped(path, reason) => {
+                        debug!("Skipped {}: {}", path.display(), reason);
+                        sidecar::write_why_txt(path, reason).ok();
+                    }
+                }
+                results.push(result);
+            }
+        }
+        
+        info!("All {} stability checks completed", completed);
         
         info!("Finished scanning {}: {} files checked, {} media files found, {} candidates", 
               root.display(), files_checked, media_files_found, 
