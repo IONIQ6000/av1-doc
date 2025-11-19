@@ -208,23 +208,40 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     info!("Job {}: File is not AV1, proceeding with transcode", job.id);
 
     // Extract and store video metadata for estimation
+    info!("Job {}: Extracting video metadata for estimation...", job.id);
     if let Some(video_stream) = video_streams.first() {
+        info!("Job {}: Found video stream, extracting metadata...", job.id);
         job.video_codec = video_stream.codec_name.clone();
         job.video_width = video_stream.width;
         job.video_height = video_stream.height;
         job.video_frame_rate = video_stream.avg_frame_rate.clone();
         
+        info!("Job {}: Extracted basic metadata - codec: {:?}, width: {:?}, height: {:?}, fps: {:?}", 
+              job.id, job.video_codec, job.video_width, job.video_height, job.video_frame_rate);
+        
         // Get bitrate from video stream first, fallback to format bitrate
         if let Some(stream_bitrate_str) = &video_stream.bit_rate {
+            info!("Job {}: Trying to parse stream bitrate: {}", job.id, stream_bitrate_str);
             if let Ok(bitrate) = stream_bitrate_str.parse::<u64>() {
                 job.video_bitrate = Some(bitrate);
+                info!("Job {}: Parsed stream bitrate: {} bps", job.id, bitrate);
+            } else {
+                warn!("Job {}: Failed to parse stream bitrate: {}", job.id, stream_bitrate_str);
             }
+        } else {
+            info!("Job {}: No stream bitrate found, trying format bitrate...", job.id);
         }
         if job.video_bitrate.is_none() {
             if let Some(format_bitrate_str) = &meta.format.bit_rate {
+                info!("Job {}: Trying to parse format bitrate: {}", job.id, format_bitrate_str);
                 if let Ok(bitrate) = format_bitrate_str.parse::<u64>() {
                     job.video_bitrate = Some(bitrate);
+                    info!("Job {}: Parsed format bitrate: {} bps", job.id, bitrate);
+                } else {
+                    warn!("Job {}: Failed to parse format bitrate: {}", job.id, format_bitrate_str);
                 }
+            } else {
+                warn!("Job {}: No format bitrate found either", job.id);
             }
         }
         
@@ -235,20 +252,27 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         let has_bitrate = job.video_bitrate.is_some();
         let has_fps = job.video_frame_rate.is_some();
         
+        info!("Job {}: Metadata validation - codec: {}, width: {}, height: {}, bitrate: {}, fps: {}", 
+              job.id, has_codec, has_width, has_height, has_bitrate, has_fps);
+        
         if has_codec && has_width && has_height && has_bitrate && has_fps {
-            info!("Job {}: Video metadata complete - codec: {:?}, resolution: {:?}x{:?}, bitrate: {:?} bps, fps: {:?} (estimation will work)", 
+            info!("Job {}: ✅ Video metadata COMPLETE - codec: {:?}, resolution: {:?}x{:?}, bitrate: {:?} bps, fps: {:?} (ESTIMATION WILL WORK)", 
                   job.id, job.video_codec, job.video_width, job.video_height, job.video_bitrate, job.video_frame_rate);
         } else {
-            warn!("Job {}: Video metadata incomplete - codec: {}, width: {}, height: {}, bitrate: {}, fps: {} (estimation will NOT work)", 
+            warn!("Job {}: ❌ Video metadata INCOMPLETE - codec: {}, width: {}, height: {}, bitrate: {}, fps: {} (ESTIMATION WILL NOT WORK)", 
                   job.id, has_codec, has_width, has_height, has_bitrate, has_fps);
             warn!("Job {}: Missing fields - codec: {:?}, width: {:?}, height: {:?}, bitrate: {:?}, fps: {:?}", 
                   job.id, job.video_codec, job.video_width, job.video_height, job.video_bitrate, job.video_frame_rate);
         }
         
         // Save job immediately after extracting metadata so TUI can use it
-        save_job(job, &cfg.job_state_dir)?;
+        info!("Job {}: Saving job with metadata...", job.id);
+        match save_job(job, &cfg.job_state_dir) {
+            Ok(()) => info!("Job {}: ✅ Job saved successfully with metadata", job.id),
+            Err(e) => error!("Job {}: ❌ Failed to save job: {}", job.id, e),
+        }
     } else {
-        warn!("Job {}: No video stream found - cannot extract metadata for estimation", job.id);
+        warn!("Job {}: ❌ No video stream found - cannot extract metadata for estimation", job.id);
     }
 
     // Step 4: Classify source
