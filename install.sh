@@ -87,6 +87,25 @@ install_docker() {
     if command -v docker &> /dev/null; then
         local docker_version=$(docker --version)
         log_info "Docker already installed: $docker_version"
+        
+        # Check if Docker service is running
+        if systemctl is-active --quiet docker; then
+            log_info "Docker service is running"
+        else
+            log_warn "Docker is installed but service is not running. Starting Docker..."
+            systemctl start docker
+            sleep 3
+            if systemctl is-active --quiet docker; then
+                log_info "Docker service started successfully"
+            else
+                log_error "Failed to start Docker service. Please check: systemctl status docker"
+                exit 1
+            fi
+        fi
+        
+        # Enable Docker to start on boot
+        systemctl enable docker
+        
         return
     fi
     
