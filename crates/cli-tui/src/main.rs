@@ -372,8 +372,7 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .column_spacing(1)
-        .widths(widths);
+        .column_spacing(1);
 
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
