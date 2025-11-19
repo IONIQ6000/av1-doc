@@ -40,21 +40,13 @@ impl App {
         // Reload jobs
         match load_all_jobs(&self.job_state_dir) {
             Ok(jobs) => {
-                eprintln!("DEBUG: Loaded {} jobs from {}", jobs.len(), self.job_state_dir.display());
                 self.jobs = jobs;
                 // Sort by creation time (newest first)
                 self.jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
             }
-            Err(e) => {
-                // Log error but don't crash - show empty table
-                eprintln!("ERROR: Failed to load jobs from {}: {}", self.job_state_dir.display(), e);
-                eprintln!("DEBUG: Directory exists: {}", self.job_state_dir.exists());
-                if self.job_state_dir.exists() {
-                    if let Ok(entries) = std::fs::read_dir(&self.job_state_dir) {
-                        let count: usize = entries.count();
-                        eprintln!("DEBUG: Found {} files in directory", count);
-                    }
-                }
+            Err(_e) => {
+                // Silently fail - show empty table
+                // Errors are visible in the UI (empty table, status counts)
                 self.jobs = Vec::new();
             }
         }
@@ -84,11 +76,6 @@ fn main() -> Result<()> {
     
     let cfg = TranscodeConfig::load_config(config_path)
         .context("Failed to load configuration")?;
-    
-    eprintln!("TUI: Using job state directory: {}", cfg.job_state_dir.display());
-    if !cfg.job_state_dir.exists() {
-        eprintln!("Warning: Job state directory does not exist: {}", cfg.job_state_dir.display());
-    }
 
     // Setup terminal
     crossterm::terminal::enable_raw_mode()?;
