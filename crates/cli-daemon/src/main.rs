@@ -218,16 +218,30 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
 
     // Step 6: Run transcoding
     info!("Job {}: Starting ffmpeg transcoding...", job.id);
-    let ffmpeg_result = ffmpeg_docker::run_av1_vaapi_job(
+    let ffmpeg_result = match ffmpeg_docker::run_av1_vaapi_job(
         cfg,
         &job.source_path,
         &temp_output,
         &meta,
         &decision,
-    ).await
-        .with_context(|| format!("Failed to run ffmpeg for: {}", job.source_path.display()))?;
+    ).await {
+        Ok(result) => result,
+        Err(e) => {
+            error!("Job {}: Failed to execute ffmpeg command: {}", job.id, e);
+            let reason = format!("ffmpeg execution failed: {}", e);
+            sidecar::write_why_txt(&job.source_path, &reason)?;
+            job.status = JobStatus::Failed;
+            job.reason = Some(reason);
+            job.finished_at = Some(Utc::now());
+            save_job(job, &cfg.job_state_dir)?;
+            return Ok(());
+        }
+    };
 
     if ffmpeg_result.exit_code != 0 {
+        error!("Job {}: ffmpeg failed with exit code {}", job.id, ffmpeg_result.exit_code);
+        error!("Job {}: ffmpeg STDOUT: {}", job.id, ffmpeg_result.stdout);
+        error!("Job {}: ffmpeg STDERR: {}", job.id, ffmpeg_result.stderr);
         let reason = format!("ffmpeg exit code {}", ffmpeg_result.exit_code);
         sidecar::write_why_txt(&job.source_path, &reason)?;
         job.status = JobStatus::Failed;
@@ -236,6 +250,8 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         save_job(job, &cfg.job_state_dir)?;
         return Ok(());
     }
+
+    info!("Job {}: ffmpeg completed successfully (exit code 0)", job.id);
 
     // Step 7: Verify temp output file exists and is valid
     if !temp_output.exists() {

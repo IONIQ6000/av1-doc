@@ -150,6 +150,12 @@ pub async fn run_av1_vaapi_job(
         cmd.arg(arg);
     }
 
+    // Log the full command for debugging
+    use log::debug;
+    debug!("ffmpeg docker command: docker run --rm --privileged --device {}:{} -v {}:/config {} ffmpeg [args...]",
+           cfg.gpu_device.display(), cfg.gpu_device.display(), parent_dir.display(), cfg.docker_image);
+    debug!("ffmpeg args: {:?}", ffmpeg_args);
+
     // Execute docker command
     let output = cmd
         .output()
@@ -159,6 +165,8 @@ pub async fn run_av1_vaapi_job(
     let exit_code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    debug!("ffmpeg exit code: {}, stdout length: {}, stderr length: {}", exit_code, stdout.len(), stderr.len());
 
     Ok(FFmpegResult {
         exit_code,
