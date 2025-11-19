@@ -48,6 +48,13 @@ pub struct FFProbeStream {
 
 /// Run ffprobe via Docker and parse the JSON output
 pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFProbeData> {
+    use log::debug;
+    
+    // Verify file exists before trying to probe
+    if !file_path.exists() {
+        anyhow::bail!("File does not exist: {}", file_path.display());
+    }
+    
     // Get parent directory and basename for Docker volume mounting
     let parent_dir = file_path
         .parent()
@@ -57,8 +64,17 @@ pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFPro
         .and_then(|n| n.to_str())
         .context("File path has no basename")?;
 
+    // Verify parent directory exists
+    if !parent_dir.exists() {
+        anyhow::bail!("Parent directory does not exist: {}", parent_dir.display());
+    }
+
     // Container path will be /config/<basename>
+    // Use proper escaping for paths with spaces/special chars
     let container_path = format!("/config/{}", basename);
+
+    debug!("ffprobe: mounting {} to /config", parent_dir.display());
+    debug!("ffprobe: probing file {} in container", container_path);
 
     // Build docker command
     // Note: Using --privileged flag required when Docker runs inside LXC containers
@@ -70,11 +86,11 @@ pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFPro
         .arg("--device")
         .arg(format!("{}:{}", cfg.gpu_device.display(), cfg.gpu_device.display()))
         .arg("-v")
-        .arg(format!("{}:/config", parent_dir.display()))
+        .arg(format!("{}:/config:ro", parent_dir.display())) // Add :ro for read-only
         .arg(&cfg.docker_image)
         .arg("ffprobe")
         .arg("-v")
-        .arg("quiet")
+        .arg("error") // Change from "quiet" to "error" to see errors
         .arg("-print_format")
         .arg("json")
         .arg("-show_streams")
@@ -91,10 +107,20 @@ pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFPro
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let exit_code = output.status.code().unwrap_or(-1);
+        
+        // Log the full command for debugging
+        debug!("ffprobe command failed. Full command would be:");
+        debug!("  docker run --rm --privileged --device {}:{} -v {}:/config:ro {} ffprobe ...",
+               cfg.gpu_device.display(), cfg.gpu_device.display(),
+               parent_dir.display(), cfg.docker_image);
+        
         anyhow::bail!(
-            "ffprobe failed (exit code {}) for {}:\nSTDERR: {}\nSTDOUT: {}",
+            "ffprobe failed (exit code {}) for {}:\nParent dir: {}\nBasename: {}\nContainer path: {}\nSTDERR: {}\nSTDOUT: {}",
             exit_code,
             file_path.display(),
+            parent_dir.display(),
+            basename,
+            container_path,
             stderr,
             stdout
         );
