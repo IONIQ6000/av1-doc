@@ -207,6 +207,31 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
 
     info!("Job {}: File is not AV1, proceeding with transcode", job.id);
 
+    // Extract and store video metadata for estimation
+    if let Some(video_stream) = video_streams.first() {
+        job.video_codec = video_stream.codec_name.clone();
+        job.video_width = video_stream.width;
+        job.video_height = video_stream.height;
+        job.video_frame_rate = video_stream.avg_frame_rate.clone();
+        
+        // Get bitrate from video stream first, fallback to format bitrate
+        if let Some(stream_bitrate_str) = &video_stream.bit_rate {
+            if let Ok(bitrate) = stream_bitrate_str.parse::<u64>() {
+                job.video_bitrate = Some(bitrate);
+            }
+        }
+        if job.video_bitrate.is_none() {
+            if let Some(format_bitrate_str) = &meta.format.bit_rate {
+                if let Ok(bitrate) = format_bitrate_str.parse::<u64>() {
+                    job.video_bitrate = Some(bitrate);
+                }
+            }
+        }
+        
+        info!("Job {}: Video metadata - codec: {:?}, resolution: {:?}x{:?}, bitrate: {:?} bps, fps: {:?}", 
+              job.id, job.video_codec, job.video_width, job.video_height, job.video_bitrate, job.video_frame_rate);
+    }
+
     // Step 4: Classify source
     let decision = classifier::classify_web_source(&job.source_path, &meta.format, &meta.streams);
     job.is_web_like = decision.is_web_like();

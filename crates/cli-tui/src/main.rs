@@ -15,31 +15,105 @@ use std::time::Duration;
 use sysinfo::System;
 use humansize::{format_size, DECIMAL};
 
-/// Estimate space savings in GB for AV1 transcoding
-/// Uses conservative AV1 compression ratios based on typical codec efficiency:
-/// - HEVC sources: ~2.5:1 compression (40% of original = 60% savings)
-/// - H.264 sources: ~3.5:1 compression (28.5% of original = 71.5% savings)
-/// - Unknown/other: ~2.0:1 compression (50% of original = 50% savings)
-/// 
-/// For estimation without codec info, we use a conservative 2.5:1 ratio
-/// which represents typical AV1 efficiency vs modern codecs (HEVC)
-fn estimate_space_savings_gb(original_bytes: Option<u64>) -> Option<f64> {
-    let orig_bytes = original_bytes?;
+/// Estimate space savings in GB for AV1 transcoding based on video properties
+/// Uses bitrate estimation considering resolution, frame rate, and source codec efficiency
+fn estimate_space_savings_gb(job: &Job) -> Option<f64> {
+    let orig_bytes = job.original_bytes?;
     if orig_bytes == 0 {
         return None;
     }
     
-    // Use conservative AV1 compression ratio of 2.5:1
-    // This means the output will be approximately 40% of the original size
-    // Savings = 60% of original
-    // Based on research: AV1 typically achieves 50-60% bitrate reduction vs HEVC
-    // For file size estimation, we use 2.5:1 ratio (conservative estimate)
-    let compression_ratio = 2.5;
-    let estimated_output_bytes = orig_bytes as f64 / compression_ratio;
-    let estimated_savings_bytes = orig_bytes as f64 - estimated_output_bytes;
+    // Need video metadata to do proper estimation
+    let (width, height, bitrate_bps, codec, frame_rate_str) = (
+        job.video_width?,
+        job.video_height?,
+        job.video_bitrate?,
+        job.video_codec.as_deref()?,
+        job.video_frame_rate.as_deref()?,
+    );
+    
+    // Parse frame rate (format: "30/1" or "29.97")
+    let fps = parse_frame_rate(frame_rate_str).unwrap_or(30.0);
+    
+    // Calculate pixels per frame and total pixels per second
+    let pixels_per_frame = (width * height) as f64;
+    let pixels_per_second = pixels_per_frame * fps;
+    
+    // Estimate AV1 bitrate based on resolution and frame rate
+    // AV1 bitrate estimation formula based on resolution and frame rate
+    // Higher resolution and frame rate require more bitrate
+    // Base bitrate per megapixel-second for AV1 at reasonable quality
+    let base_bitrate_per_megapixel_sec = 0.5; // Mbps per megapixel-second (conservative)
+    let megapixels_per_second = pixels_per_second / 1_000_000.0;
+    let estimated_av1_bitrate_mbps = megapixels_per_second * base_bitrate_per_megapixel_sec;
+    
+    // Adjust based on source codec efficiency
+    // AV1 efficiency vs source codec (bitrate reduction factor)
+    let codec_efficiency_factor = match codec.to_lowercase().as_str() {
+        "hevc" | "h265" => 0.55,  // AV1 uses ~55% of HEVC bitrate (45% reduction)
+        "h264" | "avc" => 0.40,   // AV1 uses ~40% of H.264 bitrate (60% reduction)
+        "vp9" => 0.85,            // AV1 uses ~85% of VP9 bitrate (15% reduction)
+        "av1" => 1.0,             // Already AV1, no savings
+        _ => 0.50,                // Conservative estimate for unknown codecs
+    };
+    
+    // If we have source bitrate, use it for more accurate estimation
+    // Otherwise use resolution-based estimation
+    let source_bitrate_mbps = bitrate_bps as f64 / 1_000_000.0;
+    let estimated_av1_bitrate_mbps = if source_bitrate_mbps > 0.0 {
+        // Use source bitrate adjusted by codec efficiency
+        source_bitrate_mbps * codec_efficiency_factor
+    } else {
+        // Fallback to resolution-based estimation
+        estimated_av1_bitrate_mbps
+    };
+    
+    // Calculate duration from file size and bitrate
+    // Total bitrate includes video + audio + overhead
+    // Estimate audio bitrate (typically 128-256 kbps for most content)
+    let estimated_audio_bitrate_mbps = 0.2; // 200 kbps average
+    let total_source_bitrate_mbps = if source_bitrate_mbps > 0.0 {
+        source_bitrate_mbps + estimated_audio_bitrate_mbps
+    } else {
+        // If no source bitrate, estimate from file size
+        // duration = file_size_bytes * 8 / bitrate_bps
+        // We'll use a conservative estimate
+        estimated_av1_bitrate_mbps * 2.0 + estimated_audio_bitrate_mbps
+    };
+    
+    // Calculate duration in seconds
+    let duration_seconds = (orig_bytes as f64 * 8.0) / (total_source_bitrate_mbps * 1_000_000.0);
+    
+    // Calculate estimated AV1 file size
+    // Estimated size = (video_bitrate + audio_bitrate) * duration / 8
+    let total_av1_bitrate_mbps = estimated_av1_bitrate_mbps + estimated_audio_bitrate_mbps;
+    let estimated_av1_bytes = (total_av1_bitrate_mbps * 1_000_000.0 * duration_seconds) / 8.0;
+    
+    // Ensure estimated size is reasonable (not larger than original)
+    let estimated_av1_bytes = estimated_av1_bytes.min(orig_bytes as f64 * 0.95);
+    
+    // Calculate savings
+    let estimated_savings_bytes = orig_bytes as f64 - estimated_av1_bytes;
     
     // Convert to GB (1 GB = 1,000,000,000 bytes)
     Some(estimated_savings_bytes / 1_000_000_000.0)
+}
+
+/// Parse frame rate from string format (e.g., "30/1", "29.97", "60")
+fn parse_frame_rate(frame_rate_str: &str) -> Option<f64> {
+    // Try parsing as fraction (e.g., "30/1")
+    if let Some(slash_pos) = frame_rate_str.find('/') {
+        let num_str = &frame_rate_str[..slash_pos];
+        let den_str = &frame_rate_str[slash_pos + 1..];
+        if let (Ok(num), Ok(den)) = (num_str.parse::<f64>(), den_str.parse::<f64>()) {
+            if den != 0.0 {
+                return Some(num / den);
+            }
+        }
+    }
+    
+    // Try parsing as decimal (e.g., "29.97")
+    frame_rate_str.parse::<f64>().ok()
 }
 
 struct App {
@@ -421,15 +495,13 @@ fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 "-".to_string()
             }
-        } else if let Some(orig) = job.original_bytes {
+        } else {
             // Estimate savings if not yet transcoded
-            if let Some(savings_gb) = estimate_space_savings_gb(Some(orig)) {
+            if let Some(savings_gb) = estimate_space_savings_gb(job) {
                 format!("~{:.1}GB", savings_gb)
             } else {
                 "-".to_string()
             }
-        } else {
-            "-".to_string()
         };
         
         // Duration/Elapsed time
@@ -613,15 +685,13 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
                     } else {
                         "-".to_string()
                     }
-                } else if let Some(orig) = job.original_bytes {
+                } else {
                     // Estimate savings if not yet transcoded
-                    if let Some(savings_gb) = estimate_space_savings_gb(Some(orig)) {
+                    if let Some(savings_gb) = estimate_space_savings_gb(job) {
                         format!("~{:.1}GB", savings_gb)
                     } else {
                         "-".to_string()
                     }
-                } else {
-                    "-".to_string()
                 };
 
                 let duration = if let Some(started) = job.started_at {

@@ -40,6 +40,16 @@ pub struct Job {
     pub new_bytes: Option<u64>,
     /// Whether the source was classified as web-like
     pub is_web_like: bool,
+    /// Video codec name (e.g., "hevc", "h264")
+    pub video_codec: Option<String>,
+    /// Video bitrate in bits per second (from format or stream)
+    pub video_bitrate: Option<u64>,
+    /// Video width in pixels
+    pub video_width: Option<i32>,
+    /// Video height in pixels
+    pub video_height: Option<i32>,
+    /// Video frame rate (as fraction string, e.g., "30/1")
+    pub video_frame_rate: Option<String>,
 }
 
 impl Job {
@@ -57,6 +67,11 @@ impl Job {
             original_bytes: None,
             new_bytes: None,
             is_web_like: false,
+            video_codec: None,
+            video_bitrate: None,
+            video_width: None,
+            video_height: None,
+            video_frame_rate: None,
         }
     }
 }
