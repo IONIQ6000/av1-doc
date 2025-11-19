@@ -38,22 +38,61 @@ impl App {
     fn get_gpu_usage(&self) -> f64 {
         use std::process::Command;
         
-        // Method 1: Try reading from /sys/kernel/debug/dri/*/i915_frequency_info
-        // This is the most reliable source for Intel GPUs (requires debugfs mounted)
+        // Method 1: Try reading GPU frequency and use as proxy for usage
+        // Higher frequency = higher usage (rough approximation)
+        // Read from /sys/class/drm/card0/gt_min_freq_mhz and gt_max_freq_mhz
+        // Then try to read current frequency from various locations
+        let mut min_freq = 0.0;
+        let mut max_freq = 0.0;
+        let mut curr_freq = 0.0;
+        
+        // Try to read min/max frequencies
+        for card_num in 0..4 {
+            for gt_num in 0..4 {
+                let min_path = format!("/sys/class/drm/card{}/gt{}/gt_min_freq_mhz", card_num, gt_num);
+                let max_path = format!("/sys/class/drm/card{}/gt{}/gt_max_freq_mhz", card_num, gt_num);
+                let curr_path = format!("/sys/class/drm/card{}/gt{}/gt_cur_freq_mhz", card_num, gt_num);
+                
+                if let Ok(content) = std::fs::read_to_string(&min_path) {
+                    if let Ok(val) = content.trim().parse::<f64>() {
+                        if min_freq == 0.0 || val < min_freq {
+                            min_freq = val;
+                        }
+                    }
+                }
+                if let Ok(content) = std::fs::read_to_string(&max_path) {
+                    if let Ok(val) = content.trim().parse::<f64>() {
+                        if val > max_freq {
+                            max_freq = val;
+                        }
+                    }
+                }
+                if let Ok(content) = std::fs::read_to_string(&curr_path) {
+                    if let Ok(val) = content.trim().parse::<f64>() {
+                        if val > curr_freq {
+                            curr_freq = val;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If we have frequency info, calculate usage as percentage
+        if max_freq > 0.0 && curr_freq > 0.0 {
+            let usage = ((curr_freq - min_freq) / (max_freq - min_freq)) * 100.0;
+            return usage.min(100.0).max(0.0);
+        }
+        
+        // Method 2: Try reading from /sys/kernel/debug/dri/*/i915_frequency_info
+        // This might have permission issues, but try anyway
         for dri_num in 0..4 {
             let debug_path = format!("/sys/kernel/debug/dri/{}/i915_frequency_info", dri_num);
             if let Ok(content) = std::fs::read_to_string(&debug_path) {
-                // Parse the frequency info file
-                // Format example: "actual frequency: 800 MHz, GPU busy: 45%"
                 for line in content.lines() {
-                    // Look for "GPU busy" or "busy" percentage
                     if let Some(busy_pos) = line.to_lowercase().find("busy") {
-                        // Find the original line (case-sensitive)
                         let original_line = &line[busy_pos..];
-                        // Look for number followed by %
                         if let Some(pct_pos) = original_line.find('%') {
                             let before_pct = &original_line[..pct_pos];
-                            // Extract the last number before %
                             let parts: Vec<&str> = before_pct.split_whitespace().collect();
                             if let Some(last_part) = parts.last() {
                                 if let Ok(val) = last_part.parse::<f64>() {
@@ -66,8 +105,7 @@ impl App {
             }
         }
         
-        // Method 2: Try reading from device directory - check for any utilization files
-        // Check card0 device directory for any files that might contain usage info
+        // Method 3: Try reading from device directory
         let device_dir = "/sys/class/drm/card0/device";
         if let Ok(entries) = std::fs::read_dir(device_dir) {
             for entry in entries.flatten() {
@@ -78,9 +116,7 @@ impl App {
                        name_lower.contains("load") || name_lower.contains("usage") {
                         if let Ok(content) = std::fs::read_to_string(&path) {
                             let trimmed = content.trim();
-                            // Try parsing as percentage directly
                             if let Ok(val) = trimmed.parse::<f64>() {
-                                // If value is > 1, might be in 0-100 range, otherwise 0-1
                                 let pct = if val > 1.0 { val } else { val * 100.0 };
                                 return pct.min(100.0).max(0.0);
                             }
@@ -90,8 +126,7 @@ impl App {
             }
         }
         
-        // Method 3: Try using intel_gpu_top with timeout (may fail due to PMU)
-        // Use timeout to prevent hanging
+        // Method 4: Try using intel_gpu_top with timeout
         if let Ok(output) = Command::new("timeout")
             .args(&["1", "intel_gpu_top", "-l", "1", "-n", "1"])
             .output()
