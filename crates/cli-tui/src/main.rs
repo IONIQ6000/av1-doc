@@ -314,7 +314,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Create vertical layout with explicit constraints
     // Use exact calculations to prevent overlap
     let top_height = 3;
-    let current_job_height = if running_job.is_some() { 4 } else { 0 };
+    let current_job_height = if running_job.is_some() { 5 } else { 0 }; // Increased to 5 lines for 3 lines of text + borders
     let bottom_height = 3;
     let available_height = size.height.saturating_sub(top_height + current_job_height + bottom_height);
     
@@ -359,31 +359,70 @@ fn ui(f: &mut Frame, app: &mut App) {
 
 fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
     if let Some(job) = app.jobs.iter().find(|j| j.status == JobStatus::Running) {
+        // Status
+        let status_str = match job.status {
+            JobStatus::Pending => "PEND",
+            JobStatus::Running => "RUN",
+            JobStatus::Success => "OK",
+            JobStatus::Failed => "FAIL",
+            JobStatus::Skipped => "SKIP",
+        };
+        
+        // File name
         let file_name = job.source_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("?")
             .to_string();
         
-        let elapsed = if let Some(started) = job.started_at {
-            let dur = Utc::now() - started;
-            format!("{}s", dur.num_seconds())
-        } else {
-            "-".to_string()
-        };
-        
+        // Original size
         let orig_size = job.original_bytes
             .map(|b| format_size(b, DECIMAL))
             .unwrap_or_else(|| "-".to_string());
         
-        let info_text = format!(
-            "Transcoding: {} | Size: {} | Elapsed: {}",
-            truncate_string(&file_name, 60),
-            orig_size,
-            elapsed
-        );
+        // New size
+        let new_size = job.new_bytes
+            .map(|b| format_size(b, DECIMAL))
+            .unwrap_or_else(|| "-".to_string());
         
-        let paragraph = Paragraph::new(info_text)
+        // Savings percentage
+        let savings = if let (Some(orig), Some(new)) = (job.original_bytes, job.new_bytes) {
+            if orig > 0 {
+                let pct = ((orig - new) as f64 / orig as f64) * 100.0;
+                format!("{:.1}%", pct)
+            } else {
+                "-".to_string()
+            }
+        } else {
+            "-".to_string()
+        };
+        
+        // Duration/Elapsed time
+        let duration = if let Some(started) = job.started_at {
+            if let Some(finished) = job.finished_at {
+                // Job finished, show total duration
+                let dur = finished - started;
+                format!("{}s", dur.num_seconds())
+            } else {
+                // Job still running, show elapsed time
+                let dur = Utc::now() - started;
+                format!("{}s", dur.num_seconds())
+            }
+        } else {
+            "-".to_string()
+        };
+        
+        // Reason
+        let reason = job.reason.as_deref().unwrap_or("-");
+        
+        // Format as table-like display with all columns
+        let info_lines = vec![
+            format!("ST: {} | FILE: {}", status_str, truncate_string(&file_name, 50)),
+            format!("ORIG: {} | NEW: {} | SAVE: {} | TIME: {}", orig_size, new_size, savings, duration),
+            format!("REASON: {}", truncate_string(reason, 70)),
+        ];
+        
+        let paragraph = Paragraph::new(info_lines.join("\n"))
             .block(Block::default()
                 .borders(Borders::ALL)
                 .title("▶ CURRENT JOB")
@@ -542,9 +581,18 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
                     "-".to_string()
                 };
 
-                let duration = if let (Some(started), Some(finished)) = (job.started_at, job.finished_at) {
-                    let dur = finished - started;
-                    format!("{}s", dur.num_seconds())
+                let duration = if let Some(started) = job.started_at {
+                    if let Some(finished) = job.finished_at {
+                        // Job finished, show total duration
+                        let dur = finished - started;
+                        format!("{}s", dur.num_seconds())
+                    } else if job.status == JobStatus::Running {
+                        // Job still running, show elapsed time
+                        let dur = Utc::now() - started;
+                        format!("{}s", dur.num_seconds())
+                    } else {
+                        "-".to_string()
+                    }
                 } else {
                     "-".to_string()
                 };
