@@ -508,7 +508,16 @@ fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
                     "calc?".to_string() // Calculation failed despite having metadata
                 }
             } else {
-                "-".to_string() // Missing metadata
+                // Show what's missing for debugging
+                let missing = vec![
+                    if job.original_bytes.is_none() { "orig" } else { "" },
+                    if job.video_codec.is_none() { "codec" } else { "" },
+                    if job.video_width.is_none() { "w" } else { "" },
+                    if job.video_height.is_none() { "h" } else { "" },
+                    if job.video_bitrate.is_none() { "br" } else { "" },
+                    if job.video_frame_rate.is_none() { "fps" } else { "" },
+                ].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(",");
+                format!("-{}", truncate_string(&missing, 10))
             }
         };
         
@@ -699,10 +708,32 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
                         if let Some(savings_gb) = estimate_space_savings_gb(job) {
                             format!("~{:.1}GB", savings_gb)
                         } else {
-                            "calc?".to_string() // Calculation failed despite having metadata
+                            // Calculation failed despite having metadata - show why
+                            let missing = vec![
+                                if job.original_bytes.is_none() { "orig_bytes" } else { "" },
+                                if job.video_codec.is_none() { "codec" } else { "" },
+                                if job.video_width.is_none() { "width" } else { "" },
+                                if job.video_height.is_none() { "height" } else { "" },
+                                if job.video_bitrate.is_none() { "bitrate" } else { "" },
+                                if job.video_frame_rate.is_none() { "fps" } else { "" },
+                            ].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(",");
+                            if missing.is_empty() {
+                                "calc?".to_string() // All metadata present but calc failed
+                            } else {
+                                format!("no:{}", truncate_string(&missing, 8))
+                            }
                         }
                     } else {
-                        "-".to_string() // Missing metadata
+                        // Show what's missing
+                        let missing = vec![
+                            if job.original_bytes.is_none() { "orig" } else { "" },
+                            if job.video_codec.is_none() { "codec" } else { "" },
+                            if job.video_width.is_none() { "w" } else { "" },
+                            if job.video_height.is_none() { "h" } else { "" },
+                            if job.video_bitrate.is_none() { "br" } else { "" },
+                            if job.video_frame_rate.is_none() { "fps" } else { "" },
+                        ].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(",");
+                        format!("-{}", truncate_string(&missing, 10))
                     }
                 };
 
