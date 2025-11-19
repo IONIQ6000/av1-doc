@@ -51,10 +51,8 @@ impl App {
             paths.push(format!("/sys/class/drm/{}/device/gpu_busy_percent", render_name));
         }
         
-        for path_str in &paths {
-        
         for path_str in paths {
-            if let Ok(content) = std::fs::read_to_string(path_str) {
+            if let Ok(content) = std::fs::read_to_string(&path_str) {
                 // Try to parse percentage from various formats
                 // Format 1: Just a number "45"
                 if let Ok(val) = content.trim().parse::<f64>() {
