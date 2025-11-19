@@ -149,23 +149,40 @@ fn main() -> Result<()> {
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
+    let size = f.size();
+    
+    // Ensure we have enough space
+    if size.height < 7 {
+        // Terminal too small, show error message
+        let error_msg = Paragraph::new("Terminal too small! Please resize to at least 7 lines.")
+            .block(Block::default().borders(Borders::ALL).title("Error"));
+        f.render_widget(error_msg, size);
+        return;
+    }
+    
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // System metrics
-            Constraint::Min(5),    // Job table (minimum 5 lines)
-            Constraint::Length(3), // Status bar
+            Constraint::Length(3), // System metrics (fixed 3 lines)
+            Constraint::Min(5),    // Job table (minimum 5 lines, rest of space)
+            Constraint::Length(3), // Status bar (fixed 3 lines)
         ])
-        .split(f.size());
+        .split(size);
 
-    // System metrics (CPU and memory)
-    render_system_metrics(f, app, chunks[0]);
+    // System metrics (CPU and memory) - render in first chunk
+    if chunks[0].height > 0 {
+        render_system_metrics(f, app, chunks[0]);
+    }
 
-    // Job table
-    render_job_table(f, &mut *app, chunks[1]);
+    // Job table - render in second chunk
+    if chunks[1].height > 0 {
+        render_job_table(f, &mut *app, chunks[1]);
+    }
 
-    // Status bar
-    render_status_bar(f, app, chunks[2]);
+    // Status bar - render in third chunk
+    if chunks[2].height > 0 {
+        render_status_bar(f, app, chunks[2]);
+    }
 }
 
 fn render_system_metrics(f: &mut Frame, app: &App, area: Rect) {
@@ -328,6 +345,15 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!("Jobs (showing {}/{})", app.jobs.len().min(20), app.jobs.len())
     };
+    
+    // Ensure we don't render outside the allocated area
+    if area.height < 3 {
+        // Area too small, show error
+        let error_msg = Paragraph::new("Not enough space for job table")
+            .block(Block::default().borders(Borders::ALL));
+        f.render_widget(error_msg, area);
+        return;
+    }
     
     let table = Table::new(rows, widths)
         .header(header)
