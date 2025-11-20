@@ -120,33 +120,50 @@ async fn main() -> Result<()> {
         let pending_count = jobs.iter().filter(|j| j.status == JobStatus::Pending).count();
         let running_count = jobs.iter().filter(|j| j.status == JobStatus::Running).count();
 
-        if pending_count > 0 {
-            info!("Found {} pending jobs, {} running jobs", pending_count, running_count);
+        // Log job counts
+        if pending_count > 0 || running_count > 0 {
+            info!("Job status: {} pending, {} running (max 1 concurrent transcoding job)", pending_count, running_count);
         }
 
-        // Find a pending job
-        if let Some(job) = jobs.iter_mut().find(|j| j.status == JobStatus::Pending) {
-            info!("Processing job {}: {}", job.id, job.source_path.display());
+        // Only start a new job if no jobs are currently running
+        // This ensures only one transcoding job runs at a time (important for single GPU)
+        if running_count == 0 {
+            // Find a pending job
+            if let Some(job) = jobs.iter_mut().find(|j| j.status == JobStatus::Pending) {
+                info!("Starting transcoding job {}: {}", job.id, job.source_path.display());
+                info!("⚠️  Only one job runs at a time - GPU will be dedicated to this job");
 
-            job.status = JobStatus::Running;
-            job.started_at = Some(Utc::now());
-            save_job(job, &cfg.job_state_dir)?;
+                job.status = JobStatus::Running;
+                job.started_at = Some(Utc::now());
+                save_job(job, &cfg.job_state_dir)?;
 
-            // Process the job
-            match process_job(&cfg, job).await {
-                Ok(()) => {
-                    info!("Job {} completed successfully", job.id);
+                // Process the job (this will block until complete)
+                match process_job(&cfg, job).await {
+                    Ok(()) => {
+                        info!("✅ Job {} completed successfully", job.id);
+                    }
+                    Err(e) => {
+                        error!("❌ Job {} failed: {}", job.id, e);
+                        job.status = JobStatus::Failed;
+                        job.reason = Some(format!("{}", e));
+                        job.finished_at = Some(Utc::now());
+                        save_job(job, &cfg.job_state_dir)?;
+                    }
                 }
-                Err(e) => {
-                    error!("Job {} failed: {}", job.id, e);
-                    job.status = JobStatus::Failed;
-                    job.reason = Some(format!("{}", e));
-                    job.finished_at = Some(Utc::now());
-                    save_job(job, &cfg.job_state_dir)?;
-                }
+            } else if pending_count == 0 {
+                debug!("No pending jobs, waiting for next scan");
             }
-        } else if pending_count == 0 && running_count == 0 {
-            debug!("No pending or running jobs, waiting for next scan");
+        } else {
+            // Job is already running - wait for it to complete
+            let running_jobs: Vec<_> = jobs.iter()
+                .filter(|j| j.status == JobStatus::Running)
+                .map(|j| j.id.clone())
+                .collect();
+            info!("⏸️  Waiting for {} running job(s) to complete before starting next: {:?}", 
+                  running_count, running_jobs);
+            if pending_count > 0 {
+                info!("   {} pending job(s) will start after current job(s) finish", pending_count);
+            }
         }
 
         // Sleep before next scan

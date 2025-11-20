@@ -810,7 +810,7 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let dir_short = truncate_string(&dir_display, 35);
 
     let status_text = format!(
-        "Total: {} | Running: {} | Pending: {} | Success: {} | Failed: {} | Skipped: {} | Dir: {} | q=quit r=refresh",
+        "Total: {} | Running: {} (max 1) | Pending: {} | Success: {} | Failed: {} | Skipped: {} | Dir: {} | q=quit r=refresh",
         total, running, pending, success, failed, skipped, dir_short
     );
 
