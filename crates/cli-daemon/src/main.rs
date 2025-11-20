@@ -188,6 +188,38 @@ async fn main() -> Result<()> {
                   running_count, running_jobs);
             if pending_count > 0 {
                 info!("   {} pending job(s) will start after current job(s) finish", pending_count);
+                
+                // Extract metadata for pending jobs in background (for EST SAVE calculation in TUI)
+                // Only extract metadata for jobs that don't have it yet
+                let pending_jobs_without_metadata: Vec<Job> = jobs.iter()
+                    .filter(|j| j.status == JobStatus::Pending)
+                    .filter(|j| {
+                        // Check if metadata is missing
+                        j.video_codec.is_none() || 
+                        j.video_width.is_none() || 
+                        j.video_height.is_none() || 
+                        j.video_bitrate.is_none() || 
+                        j.video_frame_rate.is_none()
+                    })
+                    .take(1) // Only process one at a time to avoid overloading
+                    .cloned()
+                    .collect();
+                
+                if !pending_jobs_without_metadata.is_empty() {
+                    let job = &pending_jobs_without_metadata[0];
+                    info!("📊 Extracting metadata for pending job {} in background (for EST SAVE)...", job.id);
+                    let cfg_clone = cfg.clone();
+                    let job_id = job.id.clone();
+                    let job_path = job.source_path.clone();
+                    let job_state_dir = cfg.job_state_dir.clone();
+                    
+                    // Spawn background task to extract metadata
+                    tokio::spawn(async move {
+                        if let Err(e) = extract_metadata_for_job(&cfg_clone, &job_id, &job_path, &job_state_dir).await {
+                            warn!("Failed to extract metadata for pending job {}: {}", job_id, e);
+                        }
+                    });
+                }
             }
         }
 
@@ -825,6 +857,95 @@ async fn cleanup_orphaned_temp_files(cfg: &TranscodeConfig) -> Result<usize> {
     }
     
     Ok(cleaned_count)
+}
+
+/// Extract metadata for a pending job (background task for EST SAVE calculation)
+async fn extract_metadata_for_job(
+    cfg: &TranscodeConfig,
+    job_id: &str,
+    job_path: &PathBuf,
+    job_state_dir: &PathBuf,
+) -> Result<()> {
+    debug!("Job {}: Starting background metadata extraction for {}", job_id, job_path.display());
+    
+    // Run ffprobe to get metadata
+    let meta = match ffprobe::probe_file(cfg, job_path).await {
+        Ok(m) => m,
+        Err(e) => {
+            warn!("Job {}: Background ffprobe failed: {}", job_id, e);
+            return Err(e).with_context(|| format!("Failed to probe file: {}", job_path.display()));
+        }
+    };
+    
+    debug!("Job {}: Background ffprobe completed, found {} streams", job_id, meta.streams.len());
+    
+    // Load the job from disk (might have been updated by another process)
+    let all_jobs = load_all_jobs(job_state_dir)
+        .context("Failed to load jobs for metadata extraction")?;
+    let mut job = match all_jobs.iter().find(|j| j.id == job_id) {
+        Some(j) => j.clone(),
+        None => {
+            warn!("Job {}: Not found in job list (might have been deleted)", job_id);
+            return Ok(()); // Job doesn't exist, nothing to do
+        }
+    };
+    
+    // Only update if job is still pending and metadata is missing
+    if job.status != JobStatus::Pending {
+        debug!("Job {}: Not pending anymore, skipping metadata extraction", job_id);
+        return Ok(());
+    }
+    
+    // Check if metadata is already complete (avoid redundant extraction)
+    if job.video_codec.is_some() && 
+       job.video_width.is_some() && 
+       job.video_height.is_some() && 
+       job.video_bitrate.is_some() && 
+       job.video_frame_rate.is_some() {
+        debug!("Job {}: Already has complete metadata, skipping extraction", job_id);
+        return Ok(());
+    }
+    
+    // Check for video streams
+    let video_streams: Vec<_> = meta.streams
+        .iter()
+        .filter(|s| s.codec_type.as_deref() == Some("video"))
+        .collect();
+    
+    if video_streams.is_empty() {
+        debug!("Job {}: No video streams found, skipping metadata extraction", job_id);
+        return Ok(());
+    }
+    
+    // Extract and store video metadata
+    if let Some(video_stream) = video_streams.first() {
+        job.video_codec = video_stream.codec_name.clone();
+        job.video_width = video_stream.width;
+        job.video_height = video_stream.height;
+        job.video_frame_rate = video_stream.avg_frame_rate.clone();
+        
+        // Get bitrate from video stream first, fallback to format bitrate
+        if let Some(stream_bitrate_str) = &video_stream.bit_rate {
+            if let Ok(bitrate) = stream_bitrate_str.parse::<u64>() {
+                job.video_bitrate = Some(bitrate);
+            }
+        }
+        if job.video_bitrate.is_none() {
+            if let Some(format_bitrate_str) = &meta.format.bit_rate {
+                if let Ok(bitrate) = format_bitrate_str.parse::<u64>() {
+                    job.video_bitrate = Some(bitrate);
+                }
+            }
+        }
+        
+        // Save job with metadata
+        save_job(&job, job_state_dir)
+            .context("Failed to save job with metadata")?;
+        
+        info!("Job {}: ✅ Background metadata extraction complete - EST SAVE now available in TUI", job_id);
+    }
+    
+    Ok(())
 }
 
 /// Process a single job: probe, classify, transcode, and apply size gate
