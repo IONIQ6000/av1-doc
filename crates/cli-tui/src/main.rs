@@ -76,75 +76,77 @@ fn has_estimation_metadata(job: &Job) -> bool {
         && job.video_frame_rate.is_some()
 }
 
-/// Estimate space savings in GB for AV1 transcoding based on video properties
-/// Uses bitrate estimation considering resolution, frame rate, and source codec efficiency
+/// Calculate estimated output size based on quality and codec
 /// Returns None if required metadata is not available
-fn estimate_space_savings_gb(job: &Job) -> Option<f64> {
+fn calculate_estimated_output_size(job: &Job) -> Option<u64> {
     let orig_bytes = job.original_bytes?;
     if orig_bytes == 0 {
         return None;
     }
     
-    // Require all metadata for proper estimation - no lazy fallbacks
-    // We validate these are present even if not directly used in calculation
-    // (they ensure we have complete video metadata)
-    let (_width, _height, bitrate_bps, codec, frame_rate_str) = (
-        job.video_width?,
-        job.video_height?,
-        job.video_bitrate?,
-        job.video_codec.as_deref()?,
-        job.video_frame_rate.as_deref()?,
-    );
+    let codec = job.video_codec.as_deref()?;
     
-    // Parse frame rate to validate it's valid (format: "30/1" or "29.97")
-    // We require it to be present and parseable, even if not used in calculation
-    let _fps = parse_frame_rate(frame_rate_str)?;
+    // If we have actual quality setting, use it for more accurate estimation
+    if let Some(quality) = job.av1_quality {
+        // Base reduction percentage by quality
+        let base_reduction: f64 = match quality {
+            20..=22 => 0.45, // ~45% reduction (very high quality)
+            23..=24 => 0.55, // ~55% reduction (high quality)
+            25..=26 => 0.65, // ~65% reduction (balanced)
+            27..=28 => 0.70, // ~70% reduction (more compression)
+            29..=30 => 0.75, // ~75% reduction (high compression)
+            _ => 0.60, // Default
+        };
+        
+        // Adjust based on source codec efficiency
+        let codec_factor: f64 = match codec.to_lowercase().as_str() {
+            "h264" | "avc" => 1.05, // H.264 allows more compression
+            "hevc" | "h265" => 0.90, // HEVC already efficient, less room
+            "vp9" => 0.92, // VP9 already efficient
+            "av1" => 1.0, // Already AV1
+            _ => 1.0, // Default
+        };
+        
+        let reduction = (base_reduction * codec_factor).min(0.80).max(0.35);
+        let estimated_output_size = orig_bytes as f64 * (1.0 - reduction);
+        return Some(estimated_output_size as u64);
+    }
     
-    // Adjust based on source codec efficiency
-    // AV1 efficiency vs source codec (bitrate reduction factor)
-    // Based on real-world AV1 encoding studies and benchmarks
-    let codec_efficiency_factor = match codec.to_lowercase().as_str() {
-        "hevc" | "h265" => 0.55,  // AV1 uses ~55% of HEVC bitrate (45% reduction)
-        "h264" | "avc" => 0.40,   // AV1 uses ~40% of H.264 bitrate (60% reduction)
-        "vp9" => 0.85,            // AV1 uses ~85% of VP9 bitrate (15% reduction)
-        "av1" => 1.0,             // Already AV1, no savings
-        _ => return None,         // Unknown codec - cannot estimate without knowing efficiency
+    // Fallback to codec-based estimation if quality not available
+    let efficiency_factor = match codec.to_lowercase().as_str() {
+        "hevc" | "h265" => 0.55,
+        "h264" | "avc" => 0.40,
+        "vp9" => 0.85,
+        "av1" => 1.0,
+        _ => 0.5,
     };
-    
-    // Use source bitrate for accurate estimation
-    let source_bitrate_mbps = bitrate_bps as f64 / 1_000_000.0;
-    if source_bitrate_mbps <= 0.0 {
-        return None; // Invalid bitrate
+    Some((orig_bytes as f64 * efficiency_factor) as u64)
+}
+
+/// Estimate space savings in GB and percentage for AV1 transcoding based on video properties
+/// Uses quality setting if available, otherwise falls back to codec-based estimation
+/// Returns None if required metadata is not available
+fn estimate_space_savings(job: &Job) -> Option<(f64, f64)> { // Returns (savings_gb, savings_percent)
+    let orig_bytes = job.original_bytes?;
+    if orig_bytes == 0 {
+        return None;
     }
     
-    // Calculate AV1 bitrate using source bitrate adjusted by codec efficiency
-    let estimated_av1_bitrate_mbps = source_bitrate_mbps * codec_efficiency_factor;
-    
-    // Calculate duration from file size and bitrate
-    // Total bitrate includes video + audio + overhead
-    // Estimate audio bitrate based on typical audio encoding (128-256 kbps average)
-    let estimated_audio_bitrate_mbps = 0.2; // 200 kbps average
-    let total_source_bitrate_mbps = source_bitrate_mbps + estimated_audio_bitrate_mbps;
-    
-    // Calculate duration in seconds: duration = (file_size_bytes * 8) / bitrate_bps
-    let duration_seconds = (orig_bytes as f64 * 8.0) / (total_source_bitrate_mbps * 1_000_000.0);
-    if duration_seconds <= 0.0 {
-        return None; // Invalid duration
-    }
-    
-    // Calculate estimated AV1 file size
-    // Estimated size = (video_bitrate + audio_bitrate) * duration / 8
-    let total_av1_bitrate_mbps = estimated_av1_bitrate_mbps + estimated_audio_bitrate_mbps;
-    let estimated_av1_bytes = (total_av1_bitrate_mbps * 1_000_000.0 * duration_seconds) / 8.0;
-    
-    // Ensure estimated size is reasonable (not larger than original)
-    let estimated_av1_bytes = estimated_av1_bytes.min(orig_bytes as f64 * 0.95);
+    // Calculate estimated output size
+    let estimated_output_bytes = calculate_estimated_output_size(job)? as f64;
     
     // Calculate savings
-    let estimated_savings_bytes = orig_bytes as f64 - estimated_av1_bytes;
+    let estimated_savings_bytes = orig_bytes as f64 - estimated_output_bytes;
+    let savings_gb = estimated_savings_bytes / 1_000_000_000.0;
+    let savings_percent = (estimated_savings_bytes / orig_bytes as f64) * 100.0;
     
-    // Convert to GB (1 GB = 1,000,000,000 bytes)
-    Some(estimated_savings_bytes / 1_000_000_000.0)
+    Some((savings_gb, savings_percent))
+}
+
+/// Estimate space savings in GB for AV1 transcoding (backward compatibility)
+/// Returns None if required metadata is not available
+fn estimate_space_savings_gb(job: &Job) -> Option<f64> {
+    estimate_space_savings(job).map(|(gb, _)| gb)
 }
 
 /// Parse frame rate from string format (e.g., "30/1", "29.97", "60")
@@ -179,7 +181,7 @@ struct App {
     job_state_dir: PathBuf,
     command_dir: PathBuf,  // Directory for writing command files
     job_progress: HashMap<String, JobProgress>,  // Track progress for running jobs
-    estimated_savings_cache: HashMap<String, Option<f64>>,  // job_id -> estimated_savings_gb (cached)
+    estimated_savings_cache: HashMap<String, Option<(f64, f64)>>,  // job_id -> (estimated_savings_gb, savings_percent) (cached)
     last_refresh: DateTime<Utc>,  // Last refresh timestamp
     last_job_count: usize,  // Track job count changes for activity detection
     last_message: Option<String>,  // Status message to display
@@ -469,18 +471,14 @@ impl App {
             progress.temp_file_size = current_temp_size;
             progress.last_updated = now;
             
-            // Estimate output size based on codec efficiency
-            let estimated_output_size = if let Some(codec) = &job.video_codec {
-                let efficiency_factor = match codec.to_lowercase().as_str() {
-                    "hevc" | "h265" => 0.55,
-                    "h264" | "avc" => 0.40,
-                    "vp9" => 0.85,
-                    "av1" => 1.0,
-                    _ => 0.5, // Default conservative estimate
-                };
-                (original_size as f64 * efficiency_factor) as u64
+            // Estimate output size using quality-based calculation if available
+            let estimated_output_size = if original_size > 0 {
+                calculate_estimated_output_size(job).unwrap_or_else(|| {
+                    // Fallback to 50% if calculation fails
+                    (original_size as f64 * 0.5) as u64
+                })
             } else {
-                (original_size as f64 * 0.5) as u64 // Default 50% if codec unknown
+                0
             };
             
             // Calculate progress percentage
@@ -609,18 +607,34 @@ impl App {
                     progress.temp_file_size = current_temp_size;
                     progress.last_updated = now;
                     
-                    // Estimate output size
-                    let estimated_output_size = if let Some(codec) = &video_codec {
-                        let efficiency_factor = match codec.to_lowercase().as_str() {
-                            "hevc" | "h265" => 0.55,
-                            "h264" | "avc" => 0.40,
-                            "vp9" => 0.85,
-                            "av1" => 1.0,
-                            _ => 0.5,
-                        };
-                        (original_size as f64 * efficiency_factor) as u64
+                    // Estimate output size using quality-based calculation if available
+                    // We need to create a temporary job-like structure to use the helper function
+                    // For now, we'll use a simplified version here since we don't have full job context
+                    let estimated_output_size = if original_size > 0 {
+                        // Try to get quality from the job if available
+                        let job_for_calc = self.jobs.iter().find(|j| j.id == *job_id);
+                        if let Some(job) = job_for_calc {
+                            calculate_estimated_output_size(job).unwrap_or_else(|| {
+                                // Fallback calculation based on codec
+                                if let Some(codec) = &video_codec {
+                                    let efficiency_factor = match codec.to_lowercase().as_str() {
+                                        "hevc" | "h265" => 0.55,
+                                        "h264" | "avc" => 0.40,
+                                        "vp9" => 0.85,
+                                        "av1" => 1.0,
+                                        _ => 0.5,
+                                    };
+                                    (original_size as f64 * efficiency_factor) as u64
+                                } else {
+                                    (original_size as f64 * 0.5) as u64
+                                }
+                            })
+                        } else {
+                            // Fallback if job not found
+                            (original_size as f64 * 0.5) as u64
+                        }
                     } else {
-                        (original_size as f64 * 0.5) as u64
+                        0
                     };
                     
                     // Calculate progress percentage
@@ -672,6 +686,7 @@ impl App {
         
         // Update estimated savings cache for all jobs
         // Calculate/update estimates for jobs that have metadata
+        // This runs in the background during refresh, updating estimates as metadata becomes available
         for job in &self.jobs {
             // Skip completed jobs - they have actual savings, not estimates
             if job.status == JobStatus::Success || job.status == JobStatus::Failed || job.status == JobStatus::Skipped {
@@ -680,19 +695,18 @@ impl App {
                 continue;
             }
             
+            // Process Pending and Running jobs - calculate estimates when metadata is available
             // Check if job has metadata for estimation
             if has_estimation_metadata(job) {
-                // Check if we need to recalculate (not cached or metadata might have changed)
-                let needs_update = !self.estimated_savings_cache.contains_key(&job.id);
-                
-                if needs_update {
-                    // Calculate and cache the estimate
-                    let estimate = estimate_space_savings_gb(job);
-                    self.estimated_savings_cache.insert(job.id.clone(), estimate);
-                }
+                // Always recalculate if we have metadata now, even if previously cached
+                // This ensures estimates update when metadata becomes available (after ffprobe)
+                // or when quality setting is added during transcoding
+                let estimate = estimate_space_savings(job);
+                self.estimated_savings_cache.insert(job.id.clone(), estimate);
             } else {
-                // Job doesn't have metadata yet - store None to avoid recalculating
+                // Job doesn't have metadata yet - store None to mark that we've checked
                 // This will be updated when metadata becomes available (after ffprobe)
+                // Only store None if not already cached (to avoid overwriting valid estimates)
                 if !self.estimated_savings_cache.contains_key(&job.id) {
                     self.estimated_savings_cache.insert(job.id.clone(), None);
                 }
@@ -993,17 +1007,17 @@ fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
             ])
             .split(area);
         
-        // Estimated savings (from cache or calculate on-the-fly)
+        // Estimated savings (from cache or calculate on-the-fly) - show both GB and percentage
         let est_save_str = if let Some(cached_estimate) = app.estimated_savings_cache.get(&job.id) {
-            if let Some(savings_gb) = cached_estimate {
-                format!("~{:.1}GB", savings_gb)
+            if let Some((savings_gb, savings_pct)) = cached_estimate {
+                format!("~{:.1}GB ({:.0}%)", savings_gb, savings_pct)
             } else {
                 "-".to_string()
             }
         } else {
             // Not cached yet, try calculating on-the-fly
-            if let Some(savings_gb) = estimate_space_savings_gb(job) {
-                format!("~{:.1}GB", savings_gb)
+            if let Some((savings_gb, savings_pct)) = estimate_space_savings(job) {
+                format!("~{:.1}GB ({:.0}%)", savings_gb, savings_pct)
             } else {
                 "-".to_string()
             }
@@ -1205,19 +1219,21 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
                     .unwrap_or_else(|| "-".to_string());
 
                 let savings = if let (Some(orig), Some(new)) = (job.original_bytes, job.new_bytes) {
-                    // Actual savings if transcoding is complete
+                    // Actual savings if transcoding is complete - show both GB and percentage
                     if orig > 0 {
-                        let pct = ((orig - new) as f64 / orig as f64) * 100.0;
-                        format!("{:.1}%", pct)
+                        let savings_bytes = orig - new;
+                        let savings_gb = savings_bytes as f64 / 1_000_000_000.0;
+                        let pct = (savings_bytes as f64 / orig as f64) * 100.0;
+                        format!("{:.1}GB ({:.0}%)", savings_gb, pct)
                     } else {
                         "-".to_string()
                     }
                 } else {
-                    // Estimate savings if not yet transcoded
+                    // Estimate savings if not yet transcoded - show both GB and percentage
                     // Use cached estimate if available (calculated in background during refresh)
                     let savings_str = if let Some(cached_estimate) = app.estimated_savings_cache.get(&job.id) {
-                        if let Some(savings_gb) = cached_estimate {
-                            format!("~{:.1}GB", savings_gb)
+                        if let Some((savings_gb, savings_pct)) = cached_estimate {
+                            format!("~{:.1}GB ({:.0}%)", savings_gb, savings_pct)
                         } else {
                             // Cached as None - metadata incomplete
                             let missing = vec![
@@ -1237,8 +1253,8 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
                     } else {
                         // Not in cache yet - calculate on-the-fly (shouldn't happen often after first refresh)
                         if has_estimation_metadata(job) {
-                            if let Some(savings_gb) = estimate_space_savings_gb(job) {
-                                format!("~{:.1}GB", savings_gb)
+                            if let Some((savings_gb, savings_pct)) = estimate_space_savings(job) {
+                                format!("~{:.1}GB ({:.0}%)", savings_gb, savings_pct)
                             } else {
                                 // Calculation failed despite having metadata
                                 "calc?".to_string()
@@ -1308,7 +1324,7 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(9),        // ORIG SIZE
         Constraint::Length(9),        // NEW SIZE
         Constraint::Length(4),        // Q (QUALITY)
-        Constraint::Length(10),       // EST SAVE (wider for "~X.XGB" format)
+        Constraint::Length(15),       // EST SAVE (wider for "~X.XGB (XX%)" format)
         Constraint::Length(6),        // TIME
         Constraint::Percentage(26),   // REASON (flexible, remaining space)
     ];
