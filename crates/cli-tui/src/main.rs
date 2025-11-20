@@ -698,21 +698,17 @@ impl App {
             // Process Pending and Running jobs - calculate estimates when metadata is available
             // Check if job has metadata for estimation
             if has_estimation_metadata(job) {
-                // Always recalculate if we have metadata now, even if previously cached
-                // This ensures estimates update when metadata becomes available (after ffprobe)
-                // or when quality setting is added during transcoding
+                // Always recalculate if we have metadata - this ensures:
+                // 1. Estimates appear when metadata is first extracted (background or during transcoding)
+                // 2. Estimates update when quality setting is added
+                // 3. Estimates are always current with the latest job metadata
                 let estimate = estimate_space_savings(job);
-                
-                // Cache the estimate (no logging to avoid corrupting TUI display)
                 self.estimated_savings_cache.insert(job.id.clone(), estimate);
             } else {
                 // Job doesn't have metadata yet - store None to mark that we've checked
-                // This will be updated when metadata becomes available (after ffprobe)
-                // Only store None if not already cached (to avoid overwriting valid estimates)
-                if !self.estimated_savings_cache.contains_key(&job.id) {
-                    // No logging to avoid corrupting TUI display
-                    self.estimated_savings_cache.insert(job.id.clone(), None);
-                }
+                // This will be updated when metadata becomes available (after background extraction)
+                // Clear any cached estimate if metadata is missing (shouldn't happen, but be safe)
+                self.estimated_savings_cache.insert(job.id.clone(), None);
             }
         }
         
