@@ -1347,9 +1347,13 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
     
+    // Quality legend: explain what Q values mean (lower = higher quality/larger file, higher = more compression/smaller file)
+    // Compact format to save space in status bar
+    let quality_legend = "Q: lower=better qual/larger, higher=compressed/smaller";
+    
     let status_text = format!(
-        "Total: {} | Running: {} (max 1) | Pending: {} | Success: {} | Failed: {} | Skipped: {} | Dir: {}{} | q=quit r=refresh R=requeue",
-        total, running, pending, success, failed, skipped, dir_short, message_part
+        "Total: {} | Running: {} (max 1) | Pending: {} | Success: {} | Failed: {} | Skipped: {} | {} | Dir: {}{} | q=quit r=refresh R=requeue",
+        total, running, pending, success, failed, skipped, quality_legend, dir_short, message_part
     );
 
     let paragraph = Paragraph::new(status_text)
