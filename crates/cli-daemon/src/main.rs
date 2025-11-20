@@ -938,11 +938,47 @@ async fn extract_metadata_for_job(
             }
         }
         
+        // Verify all required metadata is present before saving
+        let has_all_metadata = job.video_codec.is_some() && 
+                               job.video_width.is_some() && 
+                               job.video_height.is_some() && 
+                               job.video_bitrate.is_some() && 
+                               job.video_frame_rate.is_some();
+        
+        if !has_all_metadata {
+            warn!("Job {}: Background metadata extraction incomplete - missing fields: codec={:?}, width={:?}, height={:?}, bitrate={:?}, fps={:?}", 
+                  job_id, job.video_codec, job.video_width, job.video_height, job.video_bitrate, job.video_frame_rate);
+        }
+        
         // Save job with metadata
         save_job(&job, job_state_dir)
             .context("Failed to save job with metadata")?;
         
-        info!("Job {}: ✅ Background metadata extraction complete - EST SAVE now available in TUI", job_id);
+        // Verify the save worked by reloading and checking
+        if let Ok(verify_jobs) = load_all_jobs(job_state_dir) {
+            if let Some(saved_job) = verify_jobs.iter().find(|j| j.id == job_id) {
+                let saved_has_metadata = saved_job.video_codec.is_some() && 
+                                        saved_job.video_width.is_some() && 
+                                        saved_job.video_height.is_some() && 
+                                        saved_job.video_bitrate.is_some() && 
+                                        saved_job.video_frame_rate.is_some();
+                if saved_has_metadata {
+                    info!("Job {}: ✅ Background metadata extraction complete - EST SAVE now available in TUI (verified: codec={:?}, {:.0}x{:.0}, bitrate={:?} bps, fps={:?})", 
+                          job_id, 
+                          saved_job.video_codec, 
+                          saved_job.video_width.unwrap_or(0), 
+                          saved_job.video_height.unwrap_or(0),
+                          saved_job.video_bitrate,
+                          saved_job.video_frame_rate);
+                } else {
+                    warn!("Job {}: ⚠️  Background metadata extraction saved but verification failed - metadata may be incomplete", job_id);
+                }
+            } else {
+                warn!("Job {}: ⚠️  Background metadata extraction saved but job not found on reload", job_id);
+            }
+        } else {
+            warn!("Job {}: ⚠️  Background metadata extraction saved but failed to verify (could not reload jobs)", job_id);
+        }
     }
     
     Ok(())
