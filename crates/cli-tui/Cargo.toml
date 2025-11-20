@@ -19,4 +19,5 @@ humansize.workspace = true
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
 chrono.workspace = true
+serde_json.workspace = true
 

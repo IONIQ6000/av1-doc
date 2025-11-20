@@ -177,22 +177,91 @@ struct App {
     table_state: TableState,
     should_quit: bool,
     job_state_dir: PathBuf,
+    command_dir: PathBuf,  // Directory for writing command files
     job_progress: HashMap<String, JobProgress>,  // Track progress for running jobs
     last_refresh: DateTime<Utc>,  // Last refresh timestamp
     last_job_count: usize,  // Track job count changes for activity detection
+    last_message: Option<String>,  // Status message to display
+    message_timeout: Option<DateTime<Utc>>,  // When to clear message
 }
 
 impl App {
     fn new(job_state_dir: PathBuf) -> Self {
+        // Derive command_dir from job_state_dir
+        let command_dir = job_state_dir.parent()
+            .map(|p| p.join("commands"))
+            .unwrap_or_else(|| PathBuf::from("/var/lib/av1d/commands"));
+        
         Self {
             jobs: Vec::new(),
             system: System::new(),
             table_state: TableState::default(),
             should_quit: false,
             job_state_dir,
+            command_dir,
             job_progress: HashMap::new(),
             last_refresh: Utc::now(),
             last_job_count: 0,
+            last_message: None,
+            message_timeout: None,
+        }
+    }
+    
+    /// Write a requeue command file for a running job
+    fn requeue_running_job(&mut self) -> Result<()> {
+        // Find the running job
+        let running_job = self.jobs.iter().find(|j| j.status == JobStatus::Running);
+        
+        match running_job {
+            Some(job) => {
+                // Create command directory if it doesn't exist
+                if !self.command_dir.exists() {
+                    std::fs::create_dir_all(&self.command_dir)
+                        .with_context(|| format!("Failed to create command directory: {}", self.command_dir.display()))?;
+                }
+                
+                // Create command file
+                let command_file = self.command_dir.join(format!("requeue-{}.json", job.id));
+                
+                // Use atomic write (write to temp file, then rename)
+                let temp_file = self.command_dir.join(format!(".requeue-{}.json.tmp", job.id));
+                
+                let command = serde_json::json!({
+                    "action": "requeue",
+                    "job_id": job.id,
+                    "reason": "manual_requeue_from_tui",
+                    "timestamp": Utc::now().to_rfc3339(),
+                });
+                
+                std::fs::write(&temp_file, serde_json::to_string_pretty(&command)?)
+                    .with_context(|| format!("Failed to write command file: {}", temp_file.display()))?;
+                
+                std::fs::rename(&temp_file, &command_file)
+                    .with_context(|| format!("Failed to rename command file: {} -> {}", 
+                        temp_file.display(), command_file.display()))?;
+                
+                self.last_message = Some(format!("✅ Requeue command sent for job: {}", 
+                    job.source_path.file_name().and_then(|n| n.to_str()).unwrap_or("?")));
+                self.message_timeout = Some(Utc::now() + chrono::Duration::seconds(5));
+                
+                // Log success (no info! macro needed, message shown in UI)
+                Ok(())
+            }
+            None => {
+                self.last_message = Some("⚠️  No running job to requeue".to_string());
+                self.message_timeout = Some(Utc::now() + chrono::Duration::seconds(3));
+                Ok(())
+            }
+        }
+    }
+    
+    /// Clear message if timeout expired
+    fn update_message(&mut self) {
+        if let Some(timeout) = self.message_timeout {
+            if Utc::now() > timeout {
+                self.last_message = None;
+                self.message_timeout = None;
+            }
         }
     }
     
@@ -512,7 +581,7 @@ impl App {
                     .find(|j| j.id == *job_id)
                     .map(|j| (j.source_path.clone(), j.original_bytes, j.started_at, j.video_codec.clone(), j.status.clone()));
             
-            if let Some((source_path, original_bytes, started_at, video_codec, status)) = job_data {
+            if let Some((source_path, original_bytes, started_at, video_codec, _status)) = job_data {
                 // Create a temporary job-like structure to pass progress detection info
                 // Since we can't mutate self while iterating, we'll update progress directly
                 let temp_output = source_path.with_extension("tmp.av1.mkv");
@@ -685,6 +754,13 @@ fn main() -> Result<()> {
                     }
                     crossterm::event::KeyCode::Char('r') => {
                         app.refresh()?;
+                    }
+                    crossterm::event::KeyCode::Char('R') => {
+                        // Force requeue running job
+                        if let Err(e) = app.requeue_running_job() {
+                            app.last_message = Some(format!("❌ Failed to requeue: {}", e));
+                            app.message_timeout = Some(Utc::now() + chrono::Duration::seconds(5));
+                        }
                     }
                     _ => {}
                 }
@@ -1183,9 +1259,16 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let dir_display = app.job_state_dir.display().to_string();
     let dir_short = truncate_string(&dir_display, 35);
 
+    // Include message if present
+    let message_part = if let Some(msg) = &app.last_message {
+        format!(" | MSG: {}", msg)
+    } else {
+        String::new()
+    };
+    
     let status_text = format!(
-        "Total: {} | Running: {} (max 1) | Pending: {} | Success: {} | Failed: {} | Skipped: {} | Dir: {} | q=quit r=refresh",
-        total, running, pending, success, failed, skipped, dir_short
+        "Total: {} | Running: {} (max 1) | Pending: {} | Success: {} | Failed: {} | Skipped: {} | Dir: {}{} | q=quit r=refresh R=requeue",
+        total, running, pending, success, failed, skipped, dir_short, message_part
     );
 
     let paragraph = Paragraph::new(status_text)

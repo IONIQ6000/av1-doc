@@ -16,6 +16,8 @@ clap.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 walkdir.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 log = "0.4"
 env_logger = "0.11"
 

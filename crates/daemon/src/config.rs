@@ -21,6 +21,33 @@ pub struct TranscodeConfig {
     pub docker_bin: PathBuf,
     /// GPU device path to pass to Docker (typically /dev/dri)
     pub gpu_device: PathBuf,
+    /// Time-based timeout in seconds for stuck job detection (default: 3600 = 1 hour)
+    #[serde(default = "default_stuck_job_timeout_secs")]
+    pub stuck_job_timeout_secs: u64,
+    /// File inactivity threshold in seconds for stuck job detection (default: 600 = 10 minutes)
+    #[serde(default = "default_stuck_job_file_inactivity_secs")]
+    pub stuck_job_file_inactivity_secs: u64,
+    /// Enable Docker process check for stuck job detection (default: true)
+    #[serde(default = "default_true")]
+    pub stuck_job_check_enable_process: bool,
+    /// Enable file activity check for stuck job detection (default: true)
+    #[serde(default = "default_true")]
+    pub stuck_job_check_enable_file_activity: bool,
+    /// Directory for command files from TUI (default: {job_state_dir}/../commands)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_dir: Option<PathBuf>,
+}
+
+fn default_stuck_job_timeout_secs() -> u64 {
+    3600 // 1 hour
+}
+
+fn default_stuck_job_file_inactivity_secs() -> u64 {
+    600 // 10 minutes
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for TranscodeConfig {
@@ -41,7 +68,22 @@ impl TranscodeConfig {
             docker_image: "lscr.io/linuxserver/ffmpeg:version-8.0-cli".to_string(),
             docker_bin: PathBuf::from("docker"),
             gpu_device: PathBuf::from("/dev/dri"),
+            stuck_job_timeout_secs: 3600, // 1 hour
+            stuck_job_file_inactivity_secs: 600, // 10 minutes
+            stuck_job_check_enable_process: true,
+            stuck_job_check_enable_file_activity: true,
+            command_dir: None, // Will be derived from job_state_dir
         }
+    }
+    
+    /// Get the command directory path, deriving from job_state_dir if not explicitly set
+    pub fn command_dir(&self) -> PathBuf {
+        self.command_dir.clone().unwrap_or_else(|| {
+            // Default to {job_state_dir}/../commands
+            self.job_state_dir.parent()
+                .map(|p| p.join("commands"))
+                .unwrap_or_else(|| PathBuf::from("/var/lib/av1d/commands"))
+        })
     }
 
     /// Load configuration from a file, or return defaults if path is None or file doesn't exist
