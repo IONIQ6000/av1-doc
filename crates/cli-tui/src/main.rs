@@ -126,18 +126,16 @@ struct App {
     table_state: TableState,
     should_quit: bool,
     job_state_dir: PathBuf,
-    gpu_device_path: PathBuf,
 }
 
 impl App {
-    fn new(job_state_dir: PathBuf, gpu_device_path: PathBuf) -> Self {
+    fn new(job_state_dir: PathBuf) -> Self {
         Self {
             jobs: Vec::new(),
             system: System::new(),
             table_state: TableState::default(),
             should_quit: false,
             job_state_dir,
-            gpu_device_path,
         }
     }
     
@@ -352,7 +350,7 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let mut app = App::new(cfg.job_state_dir.clone(), cfg.gpu_device.clone());
+    let mut app = App::new(cfg.job_state_dir.clone());
 
     // Main event loop
     loop {
