@@ -333,6 +333,12 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
             error!("Job {}: Failed to execute ffmpeg command: {}", job.id, e);
             let reason = format!("ffmpeg execution failed: {}", e);
             sidecar::write_why_txt(&job.source_path, &reason)?;
+            // Delete temp file on failure
+            if temp_output.exists() {
+                fs::remove_file(&temp_output)
+                    .with_context(|| format!("Failed to delete temp file after execution failure: {}", temp_output.display()))?;
+                info!("Job {}: 🗑️  Deleted temp file after execution failure: {}", job.id, temp_output.display());
+            }
             job.status = JobStatus::Failed;
             job.reason = Some(reason);
             job.finished_at = Some(Utc::now());
@@ -347,6 +353,12 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         error!("Job {}: ffmpeg STDERR: {}", job.id, ffmpeg_result.stderr);
         let reason = format!("ffmpeg exit code {}", ffmpeg_result.exit_code);
         sidecar::write_why_txt(&job.source_path, &reason)?;
+        // Delete temp file on failure
+        if temp_output.exists() {
+            fs::remove_file(&temp_output)
+                .with_context(|| format!("Failed to delete temp file after failure: {}", temp_output.display()))?;
+            info!("Job {}: 🗑️  Deleted temp file after failure: {}", job.id, temp_output.display());
+        }
         job.status = JobStatus::Failed;
         job.reason = Some(reason);
         job.finished_at = Some(Utc::now());
@@ -445,6 +457,10 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         let _ = fs::rename(&orig_backup, &job.source_path); // Try to restore
         let reason = "file replacement verification failed - backup restored".to_string();
         sidecar::write_why_txt(&job.source_path, &reason)?;
+        // Clean up temp file if it still exists
+        if temp_output.exists() {
+            fs::remove_file(&temp_output).ok();
+        }
         job.status = JobStatus::Failed;
         job.reason = Some(reason);
         job.finished_at = Some(Utc::now());
@@ -452,13 +468,25 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         return Ok(());
     }
 
-    // Step 10: Update job status to Success - ALL CHECKS PASSED, FILE REPLACED
+    // Step 10: ALL VERIFICATIONS PASSED - Delete original backup file
+    // The transcoded file has successfully replaced the original
+    // Now delete the .orig.mkv backup since everything worked
+    if orig_backup.exists() {
+        fs::remove_file(&orig_backup)
+            .with_context(|| format!("Failed to delete original backup file: {}", orig_backup.display()))?;
+        info!("Job {}: 🗑️  Deleted original backup file: {}", job.id, orig_backup.display());
+    } else {
+        warn!("Job {}: ⚠️  Original backup file not found (may have been deleted already): {}", job.id, orig_backup.display());
+    }
+
+    // Step 11: Update job status to Success - ALL CHECKS PASSED, FILE REPLACED, ORIGINAL DELETED
     job.status = JobStatus::Success;
     job.output_path = Some(job.source_path.clone());
     job.new_bytes = Some(new_bytes);
     job.finished_at = Some(Utc::now());
     save_job(job, &cfg.job_state_dir)?;
 
+    info!("Job {}: ✅ SUCCESS - Original file deleted, transcoded file in place", job.id);
     Ok(())
 }
 
