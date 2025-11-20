@@ -50,8 +50,18 @@ pub struct Job {
     pub video_height: Option<i32>,
     /// Video frame rate (as fraction string, e.g., "30/1")
     pub video_frame_rate: Option<String>,
-    /// AV1 encoding quality setting used (1-63, lower = higher quality)
+    /// AV1 encoding quality setting used (QP value, 20-40 range, lower = higher quality)
     pub av1_quality: Option<i32>,
+    /// Source video bit depth (8 or 10)
+    pub source_bit_depth: Option<u8>,
+    /// Source pixel format (e.g., "yuv420p", "yuv420p10le")
+    pub source_pix_fmt: Option<String>,
+    /// Target video bit depth for encoding (8 or 10)
+    pub target_bit_depth: Option<u8>,
+    /// AV1 profile used (0=Main/8-bit, 1=High/10-bit)
+    pub av1_profile: Option<u8>,
+    /// Whether source content is HDR
+    pub is_hdr: Option<bool>,
 }
 
 impl Job {
@@ -75,6 +85,11 @@ impl Job {
             video_height: None,
             video_frame_rate: None,
             av1_quality: None,
+            source_bit_depth: None,
+            source_pix_fmt: None,
+            target_bit_depth: None,
+            av1_profile: None,
+            is_hdr: None,
         }
     }
 }

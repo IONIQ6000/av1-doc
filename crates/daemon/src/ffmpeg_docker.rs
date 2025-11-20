@@ -2,7 +2,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tokio::process::Command;
 use crate::config::TranscodeConfig;
-use crate::ffprobe::FFProbeData;
+use crate::ffprobe::{FFProbeData, BitDepth};
 use crate::classifier::WebSourceDecision;
 
 /// Result of running an ffmpeg job
@@ -11,7 +11,69 @@ pub struct FFmpegResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
-    pub quality_used: i32, // Quality setting used for this encoding job
+    pub quality_used: i32, // QP value used for this encoding job
+}
+
+/// Encoding parameters determined from source analysis
+#[derive(Debug, Clone)]
+pub struct EncodingParams {
+    pub bit_depth: BitDepth,
+    pub pixel_format: String,
+    pub av1_profile: u8,
+    pub qp: i32,
+    pub is_hdr: bool,
+}
+
+/// Determine optimal encoding parameters based on source analysis
+pub fn determine_encoding_params(
+    meta: &FFProbeData,
+    input_file: &Path,
+) -> EncodingParams {
+    use log::info;
+    
+    // Find video stream
+    let video_stream = meta.streams.iter()
+        .find(|s| s.codec_type.as_deref() == Some("video"));
+    
+    // Detect bit depth
+    let bit_depth = video_stream
+        .map(|s| s.detect_bit_depth())
+        .unwrap_or(BitDepth::Bit8);
+    
+    // Check for HDR
+    let is_hdr = video_stream
+        .map(|s| s.is_hdr_content())
+        .unwrap_or(false);
+    
+    // Determine pixel format and AV1 profile based on bit depth
+    let (pixel_format, av1_profile) = match bit_depth {
+        BitDepth::Bit8 => ("nv12".to_string(), 0),
+        BitDepth::Bit10 => ("p010le".to_string(), 1),
+        BitDepth::Unknown => ("nv12".to_string(), 0), // Safe default
+    };
+    
+    // Calculate optimal QP value
+    let qp = calculate_optimal_qp(meta, input_file, bit_depth);
+    
+    info!("🎬 Encoding params: {}-bit (profile {}), QP {}, format {}, HDR: {}",
+          match bit_depth {
+              BitDepth::Bit8 => 8,
+              BitDepth::Bit10 => 10,
+              BitDepth::Unknown => 8,
+          },
+          av1_profile,
+          qp,
+          pixel_format,
+          is_hdr
+    );
+    
+    EncodingParams {
+        bit_depth,
+        pixel_format,
+        av1_profile,
+        qp,
+        is_hdr,
+    }
 }
 
 /// Run AV1 VAAPI transcoding job via Docker
@@ -21,6 +83,7 @@ pub async fn run_av1_vaapi_job(
     temp_output: &Path,
     meta: &FFProbeData,
     decision: &WebSourceDecision,
+    encoding_params: &EncodingParams,
 ) -> Result<FFmpegResult> {
     // Get parent directory and basenames for Docker volume mounting
     let parent_dir = input
@@ -100,8 +163,9 @@ pub async fn run_av1_vaapi_job(
     filter_parts.push("pad=ceil(iw/2)*2:ceil(ih/2)*2".to_string());
     filter_parts.push("setsar=1".to_string());
 
-    // Convert to NV12 format (required for VAAPI)
-    filter_parts.push("format=nv12".to_string());
+    // Convert to appropriate format based on bit depth
+    // 8-bit: nv12, 10-bit: p010le
+    filter_parts.push(format!("format={}", encoding_params.pixel_format));
     
     // Upload to VAAPI hardware surface for encoding
     filter_parts.push("hwupload=extra_hw_frames=64".to_string());
@@ -131,14 +195,18 @@ pub async fn run_av1_vaapi_job(
     ffmpeg_args.push("-c:v".to_string());
     ffmpeg_args.push("av1_vaapi".to_string());
 
-    // Smart quality calculation before encoding
-    // Analyzes source properties to determine optimal quality vs compression balance
-    let quality = calculate_optimal_quality(meta, input);
-    ffmpeg_args.push("-quality".to_string());
-    ffmpeg_args.push(quality.to_string());
+    // Use QP (Quantization Parameter) for quality control
+    // Lower QP = better quality, larger file (range: 20-40 practical)
+    ffmpeg_args.push("-qp".to_string());
+    ffmpeg_args.push(encoding_params.qp.to_string());
     
-    // Store quality for return value
-    let quality_used = quality;
+    // Set AV1 profile based on bit depth
+    // Profile 0 (Main) = 8-bit, Profile 1 (High) = 10-bit
+    ffmpeg_args.push("-profile:v".to_string());
+    ffmpeg_args.push(encoding_params.av1_profile.to_string());
+    
+    // Store QP for return value
+    let quality_used = encoding_params.qp;
 
     // Audio: copy
     ffmpeg_args.push("-c:a".to_string());
@@ -188,34 +256,37 @@ pub async fn run_av1_vaapi_job(
     })
 }
 
-/// Smart quality calculation based on source file analysis
-/// Returns optimal quality value (range: 1-63, lower = higher quality, larger file)
+/// Calculate optimal QP (Quantization Parameter) for AV1 encoding
+/// Returns optimal QP value (range: 20-40, lower = higher quality, larger file)
 /// 
-/// This public function can be called before encoding to determine quality setting.
-/// It analyzes multiple source properties BEFORE encoding to determine
-/// the optimal balance between quality and file compression:
+/// This function analyzes source properties to determine the optimal balance
+/// between quality and file compression:
 /// 
 /// Analysis Factors:
-/// 1. **Resolution** - Higher res needs higher quality to preserve detail
-/// 2. **Source Bitrate** - High bitrate sources can use more compression safely
-/// 3. **Source Codec Efficiency** - Less efficient codecs (H.264) allow more compression
-/// 4. **Frame Rate** - Higher frame rates may need slight quality adjustment
-/// 5. **File Size** - Larger files benefit from better compression ratios
+/// 1. **Resolution** - Higher res needs lower QP to preserve detail
+/// 2. **Bit Depth** - 10-bit content needs slightly lower QP
+/// 3. **Source Bitrate** - High bitrate sources can use higher QP (more compression)
+/// 4. **Source Codec Efficiency** - Less efficient codecs (H.264) allow higher QP
+/// 5. **Frame Rate** - Higher frame rates may need lower QP
 /// 
-/// Quality Calculation Strategy:
-/// - Base quality from resolution (foundation)
+/// QP Calculation Strategy:
+/// - Base QP from resolution and bit depth
+/// - Adjust based on source codec efficiency
 /// - Adjust based on source bitrate efficiency
-/// - Fine-tune based on source codec (codec-specific efficiency factors)
-/// - Ensure minimum quality for detail preservation
-/// - Ensure maximum quality to prevent over-compression
+/// - Fine-tune based on frame rate
+/// - Clamp to practical range (20-40)
 /// 
 /// Expected Results:
-/// - High bitrate H.264 sources: More compression (~55-70% reduction)
-/// - Low bitrate HEVC sources: Less compression needed (~40-50% reduction)
-/// - 4K sources: Higher quality to preserve detail (quality 22-24)
-/// - 1080p sources: Balanced quality (quality 24-26)
-/// - Lower resolutions: More compression acceptable (quality 26-28)
-pub fn calculate_optimal_quality(meta: &FFProbeData, input_file: &Path) -> i32 {
+/// - High bitrate H.264 sources: Higher QP, more compression (~60-70% reduction)
+/// - Low bitrate HEVC sources: Lower QP, preserve quality (~40-50% reduction)
+/// - 4K sources: Lower QP to preserve detail (QP 26-30)
+/// - 1080p sources: Balanced QP (QP 28-32)
+/// - 10-bit sources: Slightly lower QP to preserve color depth
+pub fn calculate_optimal_qp(
+    meta: &FFProbeData,
+    input_file: &Path,
+    bit_depth: BitDepth,
+) -> i32 {
     use log::{info, debug, warn};
     use std::fs;
     
@@ -253,46 +324,55 @@ pub fn calculate_optimal_quality(meta: &FFProbeData, input_file: &Path) -> i32 {
         .map(|m| m.len())
         .unwrap_or(0);
     
-    debug!("Quality calculation inputs: resolution={}x{}, codec={}, fps={:.2}, video_bitrate={:?} bps, file_size={} bytes",
-           width, height, source_codec, fps, video_bitrate_bps, file_size_bytes);
+    debug!("QP calculation inputs: resolution={}x{}, bit_depth={:?}, codec={}, fps={:.2}, video_bitrate={:?} bps, file_size={} bytes",
+           width, height, bit_depth, source_codec, fps, video_bitrate_bps, file_size_bytes);
     
-    // Base quality from resolution (foundation)
-    let mut quality = if height >= 2160 {
-        24 // 4K base: High quality needed for detail
+    // Base QP from resolution and bit depth
+    // Lower QP = better quality, larger file
+    let mut qp = if height >= 2160 {
+        // 4K: Need lower QP to preserve detail
+        if bit_depth == BitDepth::Bit10 { 26 } else { 28 }
     } else if height >= 1440 {
-        24 // 1440p base: High quality
+        // 1440p: High quality
+        if bit_depth == BitDepth::Bit10 { 28 } else { 30 }
     } else if height >= 1080 {
-        25 // 1080p base: Balanced quality
+        // 1080p: Balanced
+        if bit_depth == BitDepth::Bit10 { 30 } else { 32 }
     } else {
-        26 // Lower res base: More compression acceptable
+        // 720p and below: More compression acceptable
+        if bit_depth == BitDepth::Bit10 { 32 } else { 34 }
     };
     
-    // Adjust based on source codec efficiency
-    // Less efficient codecs (H.264) can accept more compression
-    // More efficient codecs (HEVC, VP9) already well-compressed, need less compression
+    // FIXED: Adjust based on source codec efficiency
+    // Less efficient codecs (H.264) can be compressed more aggressively
+    // More efficient codecs (HEVC, VP9) should preserve quality
     let codec_adjustment = match source_codec.as_str() {
         "h264" | "avc" => {
-            // H.264 is less efficient, AV1 can compress significantly more
-            -2 // Lower quality number = higher quality, but we want more compression
+            // H.264 is inefficient, AV1 can compress significantly more
+            2 // Higher QP = more compression (CORRECTED)
         }
         "hevc" | "h265" => {
-            // HEVC is already efficient, less room for compression
-            1 // Slightly higher quality number = less aggressive compression
+            // HEVC is already efficient, preserve quality
+            -1 // Lower QP = less compression (CORRECTED)
         }
         "vp9" => {
             // VP9 is already efficient
-            1 // Slightly higher quality number
+            -1 // Lower QP = less compression
         }
         "av1" => {
-            // Already AV1 - minimal change needed
-            0 // No adjustment
+            // Already AV1 - no change needed
+            0
+        }
+        "mpeg2" | "mpeg2video" => {
+            // MPEG-2 is very inefficient
+            3 // Much more compression possible
         }
         _ => {
             // Unknown codec - conservative approach
-            0 // No adjustment
+            0
         }
     };
-    quality += codec_adjustment;
+    qp += codec_adjustment;
     
     // Adjust based on source bitrate efficiency
     // Calculate bits per pixel per frame as efficiency metric
@@ -300,44 +380,58 @@ pub fn calculate_optimal_quality(meta: &FFProbeData, input_file: &Path) -> i32 {
         let pixels = (width * height) as f64;
         let bits_per_pixel_per_frame = (bitrate_bps as f64) / (pixels * fps);
         
-        debug!("Bitrate efficiency: {} bpppf (bits per pixel per frame)", bits_per_pixel_per_frame);
+        debug!("Bitrate efficiency: {:.4} bpppf (bits per pixel per frame)", bits_per_pixel_per_frame);
         
         // High bitrate (inefficient encoding) = can compress more aggressively
-        // Low bitrate (already efficient) = need higher quality to maintain quality
-        if bits_per_pixel_per_frame > 0.5 {
-            // High bitrate - can compress more
-            quality += 1; // Higher quality number = more compression
-            debug!("High bitrate detected, adjusting quality for more compression");
-        } else if bits_per_pixel_per_frame < 0.15 {
-            // Very low bitrate - already well-compressed, preserve quality
-            quality -= 1; // Lower quality number = less compression
-            debug!("Low bitrate detected, adjusting quality to preserve quality");
+        // Low bitrate (already efficient) = preserve quality
+        if bits_per_pixel_per_frame > 0.6 {
+            // Very high bitrate - compress aggressively
+            qp += 3;
+            debug!("Very high bitrate detected ({:.4} bpppf), increasing QP for more compression", bits_per_pixel_per_frame);
+        } else if bits_per_pixel_per_frame > 0.4 {
+            // High bitrate - compress more
+            qp += 2;
+            debug!("High bitrate detected ({:.4} bpppf), increasing QP", bits_per_pixel_per_frame);
+        } else if bits_per_pixel_per_frame > 0.2 {
+            // Medium bitrate - moderate compression
+            qp += 1;
+            debug!("Medium bitrate detected ({:.4} bpppf), slight QP increase", bits_per_pixel_per_frame);
+        } else if bits_per_pixel_per_frame < 0.1 {
+            // Very low bitrate - preserve quality
+            qp -= 1;
+            debug!("Low bitrate detected ({:.4} bpppf), decreasing QP to preserve quality", bits_per_pixel_per_frame);
         }
     }
     
     // Adjust for frame rate
-    // Higher frame rates may benefit from slightly higher quality to preserve motion detail
+    // Higher frame rates need lower QP to preserve motion detail
     if fps > 50.0 {
-        quality -= 1; // Slightly higher quality for high frame rate
-        debug!("High frame rate detected ({}), adjusting quality upward", fps);
+        qp -= 1; // Lower QP = better quality for high frame rate
+        debug!("High frame rate detected ({:.2}), decreasing QP to preserve motion", fps);
     } else if fps < 24.0 {
         // Lower frame rates can use more compression
-        quality += 1; // Slightly more compression
-        debug!("Low frame rate detected ({}), adjusting quality for more compression", fps);
+        qp += 1; // Higher QP = more compression
+        debug!("Low frame rate detected ({:.2}), increasing QP", fps);
     }
     
-    // Clamp quality to valid range (20-30 for practical use)
-    // Values below 20: Very high quality, large files (not needed for most content)
-    // Values above 30: Noticeable quality loss
-    quality = quality.max(20).min(30);
+    // Clamp QP to practical range (20-40)
+    // Values below 20: Excessive quality, very large files
+    // Values above 40: Noticeable quality loss
+    qp = qp.max(20).min(40);
     
     // Calculate expected file size reduction for logging
-    let expected_reduction_pct = calculate_expected_reduction(quality, &source_codec);
+    let expected_reduction_pct = calculate_expected_reduction(qp, &source_codec, bit_depth);
     
-    info!("🎯 Calculated optimal quality: {} (resolution: {}x{}, codec: {}, fps: {:.2}, expected reduction: ~{:.0}%)",
-          quality, width, height, source_codec, fps, expected_reduction_pct);
+    info!("🎯 Calculated optimal QP: {} ({}x{}, {}-bit, {}, {:.2} fps, expected reduction: ~{:.0}%)",
+          qp, width, height,
+          match bit_depth {
+              BitDepth::Bit8 => 8,
+              BitDepth::Bit10 => 10,
+              BitDepth::Unknown => 8,
+          },
+          source_codec, fps, expected_reduction_pct);
     
-    quality
+    qp
 }
 
 /// Helper function to parse frame rate from string (e.g., "30/1", "29.97", "60")
@@ -358,27 +452,34 @@ fn parse_frame_rate(frame_rate_str: &str) -> Option<f64> {
         .filter(|&f| f > 0.0 && f < 200.0) // Sanity check
 }
 
-/// Calculate expected file size reduction percentage based on quality and source codec
-fn calculate_expected_reduction(quality: i32, source_codec: &str) -> f64 {
-    // Base reduction by quality
-    let base_reduction = match quality {
-        20..=22 => 0.45, // ~45% reduction (very high quality)
-        23..=24 => 0.55, // ~55% reduction (high quality)
-        25..=26 => 0.65, // ~65% reduction (balanced)
-        27..=28 => 0.70, // ~70% reduction (more compression)
-        29..=30 => 0.75, // ~75% reduction (high compression)
+/// Calculate expected file size reduction percentage based on QP, source codec, and bit depth
+fn calculate_expected_reduction(qp: i32, source_codec: &str, bit_depth: BitDepth) -> f64 {
+    // Base reduction by QP value
+    let base_reduction = match qp {
+        20..=24 => 0.45, // ~45% reduction (very high quality)
+        25..=28 => 0.55, // ~55% reduction (high quality)
+        29..=32 => 0.65, // ~65% reduction (balanced)
+        33..=36 => 0.72, // ~72% reduction (more compression)
+        37..=40 => 0.78, // ~78% reduction (high compression)
         _ => 0.60, // Default
     };
     
     // Adjust based on source codec efficiency
     let codec_factor = match source_codec {
-        "h264" | "avc" => 1.05, // H.264 allows more compression
-        "hevc" | "h265" => 0.90, // HEVC already efficient, less room
-        "vp9" => 0.92, // VP9 already efficient
+        "h264" | "avc" => 1.08, // H.264 allows more compression
+        "hevc" | "h265" => 0.88, // HEVC already efficient, less room
+        "vp9" => 0.90, // VP9 already efficient
+        "mpeg2" | "mpeg2video" => 1.15, // MPEG-2 very inefficient
         _ => 1.0, // Default
     };
     
-    let reduction: f64 = base_reduction * codec_factor * 100.0;
-    reduction.min(80.0).max(35.0) // Clamp to 35-80%
+    // Adjust for bit depth (10-bit files are larger, less compression)
+    let bit_depth_factor = match bit_depth {
+        BitDepth::Bit10 => 0.93, // 10-bit: ~7% less compression
+        _ => 1.0,
+    };
+    
+    let reduction: f64 = base_reduction * codec_factor * bit_depth_factor * 100.0;
+    reduction.min(82.0).max(30.0) // Clamp to 30-82%
 }
 

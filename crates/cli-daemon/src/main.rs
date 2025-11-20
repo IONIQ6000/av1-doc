@@ -1049,8 +1049,23 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         job.video_height = video_stream.height;
         job.video_frame_rate = video_stream.avg_frame_rate.clone();
         
-        info!("Job {}: Extracted basic metadata - codec: {:?}, width: {:?}, height: {:?}, fps: {:?}", 
-              job.id, job.video_codec, job.video_width, job.video_height, job.video_frame_rate);
+        // Extract bit depth and HDR information
+        let bit_depth = video_stream.detect_bit_depth();
+        let is_hdr = video_stream.is_hdr_content();
+        
+        job.source_bit_depth = Some(match bit_depth {
+            daemon::BitDepth::Bit8 => 8,
+            daemon::BitDepth::Bit10 => 10,
+            daemon::BitDepth::Unknown => 8,
+        });
+        job.is_hdr = Some(is_hdr);
+        job.source_pix_fmt = video_stream.pix_fmt.clone();
+        
+        info!("Job {}: Extracted basic metadata - codec: {:?}, width: {:?}, height: {:?}, fps: {:?}, bit_depth: {}-bit{}, pix_fmt: {:?}", 
+              job.id, job.video_codec, job.video_width, job.video_height, job.video_frame_rate,
+              job.source_bit_depth.unwrap_or(8),
+              if is_hdr { " HDR" } else { "" },
+              job.source_pix_fmt);
         
         // Get bitrate from video stream first, fallback to format bitrate
         if let Some(stream_bitrate_str) = &video_stream.bit_rate {
@@ -1134,24 +1149,40 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     let temp_output = job.source_path.with_extension("tmp.av1.mkv");
     info!("Job {}: Temp output will be: {}", job.id, temp_output.display());
 
-    // Step 6: Calculate optimal quality before encoding
-    // This smart calculation analyzes source properties (resolution, bitrate, codec, fps)
-    // to determine the best balance between quality and file compression
-    let quality = ffmpeg_docker::calculate_optimal_quality(&meta, &job.source_path);
-    job.av1_quality = Some(quality);
-    info!("Job {}: Calculated optimal AV1 quality: {} (balance between quality and compression)", job.id, quality);
+    // Step 6: Determine encoding parameters
+    // Analyzes source properties (resolution, bitrate, codec, fps, bit depth)
+    // to determine optimal encoding settings
+    let encoding_params = ffmpeg_docker::determine_encoding_params(&meta, &job.source_path);
     
-    // Save job with quality setting before encoding starts
+    job.av1_quality = Some(encoding_params.qp);
+    job.target_bit_depth = Some(match encoding_params.bit_depth {
+        daemon::BitDepth::Bit8 => 8,
+        daemon::BitDepth::Bit10 => 10,
+        daemon::BitDepth::Unknown => 8,
+    });
+    job.av1_profile = Some(encoding_params.av1_profile);
+    
+    info!("Job {}: Encoding plan - Source: {}-bit{} → Target: {}-bit AV1 (profile {}), QP: {}",
+          job.id,
+          job.source_bit_depth.unwrap_or(8),
+          if job.is_hdr.unwrap_or(false) { " HDR" } else { "" },
+          job.target_bit_depth.unwrap_or(8),
+          job.av1_profile.unwrap_or(0),
+          encoding_params.qp
+    );
+    
+    // Save job with encoding parameters before encoding starts
     save_job(job, &cfg.job_state_dir)?;
     
     // Step 7: Run transcoding
-    info!("Job {}: Starting ffmpeg transcoding with quality setting: {}...", job.id, quality);
+    info!("Job {}: Starting ffmpeg transcoding with QP: {}...", job.id, encoding_params.qp);
     let ffmpeg_result = match ffmpeg_docker::run_av1_vaapi_job(
         cfg,
         &job.source_path,
         &temp_output,
         &meta,
         &decision,
+        &encoding_params,
     ).await {
         Ok(result) => result,
         Err(e) => {
@@ -1172,9 +1203,9 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         }
     };
 
-    // Store quality from ffmpeg result (should match what we calculated)
+    // Store QP from ffmpeg result (should match what we calculated)
     job.av1_quality = Some(ffmpeg_result.quality_used);
-    info!("Job {}: Using AV1 quality setting: {} for encoding", job.id, ffmpeg_result.quality_used);
+    info!("Job {}: Encoding completed with QP: {}", job.id, ffmpeg_result.quality_used);
     
     if ffmpeg_result.exit_code != 0 {
         error!("Job {}: ffmpeg failed with exit code {}", job.id, ffmpeg_result.exit_code);

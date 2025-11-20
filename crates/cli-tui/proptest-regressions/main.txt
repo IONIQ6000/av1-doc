@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b1ee9bf81be23d38334465802c6802cc386a1d0759a48e566ba777c2fd4d8ec5 # shrinks to jobs = [Job { id: "aaaaaaaaaa", source_path: "/test/video.mkv", output_path: None, created_at: 2025-11-20T18:48:12.235941Z, started_at: None, finished_at: None, status: Pending, reason: Some("test"), original_bytes: None, new_bytes: None, is_web_like: false, video_codec: None, video_bitrate: None, video_width: None, video_height: None, video_frame_rate: None, av1_quality: Some(25), source_bit_depth: None, source_pix_fmt: None, target_bit_depth: None, av1_profile: Some(0), is_hdr: None }]

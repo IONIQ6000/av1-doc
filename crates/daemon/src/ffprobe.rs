@@ -44,6 +44,16 @@ pub struct FFProbeStream {
     #[serde(rename = "bit_rate")]
     pub bit_rate: Option<String>,
     pub disposition: Option<HashMap<String, i32>>,
+    #[serde(rename = "pix_fmt")]
+    pub pix_fmt: Option<String>,
+    #[serde(rename = "bits_per_raw_sample")]
+    pub bits_per_raw_sample: Option<String>,
+    #[serde(rename = "color_transfer")]
+    pub color_transfer: Option<String>,
+    #[serde(rename = "color_primaries")]
+    pub color_primaries: Option<String>,
+    #[serde(rename = "color_space")]
+    pub color_space: Option<String>,
 }
 
 /// Run ffprobe via Docker and parse the JSON output
@@ -140,3 +150,74 @@ pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFPro
     Ok(data)
 }
 
+
+/// Bit depth of video content
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitDepth {
+    Bit8,
+    Bit10,
+    Unknown,
+}
+
+impl FFProbeStream {
+    /// Detect bit depth from stream metadata
+    /// Checks multiple sources: bits_per_raw_sample, pix_fmt, and HDR metadata
+    pub fn detect_bit_depth(&self) -> BitDepth {
+        // Method 1: Check bits_per_raw_sample (most reliable)
+        if let Some(ref bits) = self.bits_per_raw_sample {
+            if bits == "10" {
+                return BitDepth::Bit10;
+            } else if bits == "8" {
+                return BitDepth::Bit8;
+            }
+        }
+        
+        // Method 2: Parse pixel format for "10" suffix
+        if let Some(ref pix_fmt) = self.pix_fmt {
+            let fmt_lower = pix_fmt.to_lowercase();
+            if fmt_lower.contains("10") || fmt_lower.contains("p010") {
+                return BitDepth::Bit10;
+            }
+        }
+        
+        // Method 3: Check HDR metadata (implies 10-bit)
+        if self.is_hdr_content() {
+            return BitDepth::Bit10;
+        }
+        
+        // Default to 8-bit if unknown
+        BitDepth::Bit8
+    }
+    
+    /// Check if content is HDR (High Dynamic Range)
+    /// HDR content requires 10-bit encoding
+    pub fn is_hdr_content(&self) -> bool {
+        // Check color transfer characteristics
+        if let Some(ref transfer) = self.color_transfer {
+            let t = transfer.to_lowercase();
+            // PQ (Perceptual Quantizer) - HDR10
+            if t.contains("smpte2084") || t.contains("st2084") {
+                return true;
+            }
+            // HLG (Hybrid Log-Gamma) - HDR broadcast
+            if t.contains("arib-std-b67") || t.contains("hlg") {
+                return true;
+            }
+        }
+        
+        // Check color primaries (bt2020 often indicates HDR)
+        if let Some(ref primaries) = self.color_primaries {
+            let p = primaries.to_lowercase();
+            if p.contains("bt2020") {
+                // bt2020 with 10-bit is likely HDR
+                if let Some(ref bits) = self.bits_per_raw_sample {
+                    if bits == "10" {
+                        return true;
+                    }
+                }
+            }
+        }
+        
+        false
+    }
+}
