@@ -11,6 +11,7 @@ pub struct FFmpegResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+    pub quality_used: i32, // Quality setting used for this encoding job
 }
 
 /// Run AV1 VAAPI transcoding job via Docker
@@ -135,6 +136,9 @@ pub async fn run_av1_vaapi_job(
     let quality = calculate_optimal_quality(meta, input);
     ffmpeg_args.push("-quality".to_string());
     ffmpeg_args.push(quality.to_string());
+    
+    // Store quality for return value
+    let quality_used = quality;
 
     // Audio: copy
     ffmpeg_args.push("-c:a".to_string());
@@ -180,13 +184,15 @@ pub async fn run_av1_vaapi_job(
         exit_code,
         stdout,
         stderr,
+        quality_used,
     })
 }
 
 /// Smart quality calculation based on source file analysis
 /// Returns optimal quality value (range: 1-63, lower = higher quality, larger file)
 /// 
-/// This function analyzes multiple source properties BEFORE encoding to determine
+/// This public function can be called before encoding to determine quality setting.
+/// It analyzes multiple source properties BEFORE encoding to determine
 /// the optimal balance between quality and file compression:
 /// 
 /// Analysis Factors:
@@ -209,7 +215,7 @@ pub async fn run_av1_vaapi_job(
 /// - 4K sources: Higher quality to preserve detail (quality 22-24)
 /// - 1080p sources: Balanced quality (quality 24-26)
 /// - Lower resolutions: More compression acceptable (quality 26-28)
-fn calculate_optimal_quality(meta: &FFProbeData, input_file: &Path) -> i32 {
+pub fn calculate_optimal_quality(meta: &FFProbeData, input_file: &Path) -> i32 {
     use log::{info, debug, warn};
     use std::fs;
     

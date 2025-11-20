@@ -974,8 +974,18 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     let temp_output = job.source_path.with_extension("tmp.av1.mkv");
     info!("Job {}: Temp output will be: {}", job.id, temp_output.display());
 
-    // Step 6: Run transcoding
-    info!("Job {}: Starting ffmpeg transcoding...", job.id);
+    // Step 6: Calculate optimal quality before encoding
+    // This smart calculation analyzes source properties (resolution, bitrate, codec, fps)
+    // to determine the best balance between quality and file compression
+    let quality = ffmpeg_docker::calculate_optimal_quality(&meta, &job.source_path);
+    job.av1_quality = Some(quality);
+    info!("Job {}: Calculated optimal AV1 quality: {} (balance between quality and compression)", job.id, quality);
+    
+    // Save job with quality setting before encoding starts
+    save_job(job, &cfg.job_state_dir)?;
+    
+    // Step 7: Run transcoding
+    info!("Job {}: Starting ffmpeg transcoding with quality setting: {}...", job.id, quality);
     let ffmpeg_result = match ffmpeg_docker::run_av1_vaapi_job(
         cfg,
         &job.source_path,
@@ -1002,6 +1012,10 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         }
     };
 
+    // Store quality from ffmpeg result (should match what we calculated)
+    job.av1_quality = Some(ffmpeg_result.quality_used);
+    info!("Job {}: Using AV1 quality setting: {} for encoding", job.id, ffmpeg_result.quality_used);
+    
     if ffmpeg_result.exit_code != 0 {
         error!("Job {}: ffmpeg failed with exit code {}", job.id, ffmpeg_result.exit_code);
         error!("Job {}: ffmpeg STDOUT: {}", job.id, ffmpeg_result.stdout);
@@ -1135,13 +1149,20 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     }
 
     // Step 11: Update job status to Success - ALL CHECKS PASSED, FILE REPLACED, ORIGINAL DELETED
+    // Quality should already be set from ffmpeg_result, but ensure it's stored
+    if job.av1_quality.is_none() {
+        // Fallback: if quality wasn't set, use the one from ffmpeg result
+        job.av1_quality = Some(ffmpeg_result.quality_used);
+    }
+    
     job.status = JobStatus::Success;
     job.output_path = Some(job.source_path.clone());
     job.new_bytes = Some(new_bytes);
     job.finished_at = Some(Utc::now());
     save_job(job, &cfg.job_state_dir)?;
 
-    info!("Job {}: ✅ SUCCESS - Original file deleted, transcoded file in place", job.id);
+    info!("Job {}: ✅ SUCCESS - Original file deleted, transcoded file in place (quality: {})", 
+          job.id, job.av1_quality.unwrap_or(0));
     Ok(())
 }
 

@@ -1009,10 +1009,17 @@ fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
             }
         };
         
+        // Quality setting used for encoding
+        let quality_str = if let Some(quality) = job.av1_quality {
+            format!("Q{}", quality)
+        } else {
+            "-".to_string()
+        };
+        
         // Build info text
         let info_lines = vec![
             format!("STAGE: {} | FILE: {}", stage_str, truncate_string(&file_name, 50)),
-            format!("ORIG: {} | CURRENT: {} | EST SAVE: {} | PROGRESS: {:.1}% | ETA: {}", orig_size, new_size, est_save_str, progress_pct, eta_str),
+            format!("ORIG: {} | CURRENT: {} | QUALITY: {} | EST SAVE: {} | PROGRESS: {:.1}% | ETA: {}", orig_size, new_size, quality_str, est_save_str, progress_pct, eta_str),
             format!("SPEED: {} | ELAPSED: {}", speed_str, duration),
         ];
         
@@ -1145,6 +1152,7 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
         "FILE",    // FILE
         "ORIG",    // ORIG SIZE
         "NEW",     // NEW SIZE
+        "Q",       // QUALITY
         "EST SAVE", // ESTIMATED SAVINGS (GB) or ACTUAL SAVINGS (%)
         "TIME",    // DURATION
         "REASON",  // REASON
@@ -1157,6 +1165,7 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
         vec![Row::new(vec![
             "No jobs".to_string(),
             format!("Dir: {}", app.job_state_dir.display()),
+            "-".to_string(),
             "-".to_string(),
             "-".to_string(),
             "-".to_string(),
@@ -1268,12 +1277,20 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
 
                 // Truncate reason more aggressively
                 let reason = truncate_string(job.reason.as_deref().unwrap_or("-"), 30);
+                
+                // Quality setting used (if available)
+                let quality_str = if let Some(quality) = job.av1_quality {
+                    format!("{}", quality)
+                } else {
+                    "-".to_string()
+                };
 
                 Row::new(vec![
                     status_str.to_string(),
                     file_name,
                     orig_size,
                     new_size,
+                    quality_str,
                     savings,
                     duration,
                     reason,
@@ -1287,9 +1304,10 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Use Percentage for flexible columns to fill available width
     let widths = [
         Constraint::Length(5),        // ST (PEND/RUN/etc - shorter now)
-        Constraint::Percentage(35),   // FILE (largest flexible column)
+        Constraint::Percentage(30),   // FILE (largest flexible column)
         Constraint::Length(9),        // ORIG SIZE
         Constraint::Length(9),        // NEW SIZE
+        Constraint::Length(4),        // Q (QUALITY)
         Constraint::Length(10),       // EST SAVE (wider for "~X.XGB" format)
         Constraint::Length(6),        // TIME
         Constraint::Percentage(26),   // REASON (flexible, remaining space)

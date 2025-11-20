@@ -50,6 +50,8 @@ pub struct Job {
     pub video_height: Option<i32>,
     /// Video frame rate (as fraction string, e.g., "30/1")
     pub video_frame_rate: Option<String>,
+    /// AV1 encoding quality setting used (1-63, lower = higher quality)
+    pub av1_quality: Option<i32>,
 }
 
 impl Job {
@@ -72,6 +74,7 @@ impl Job {
             video_width: None,
             video_height: None,
             video_frame_rate: None,
+            av1_quality: None,
         }
     }
 }
