@@ -777,19 +777,30 @@ fn main() -> Result<()> {
 
     // Main event loop with adaptive refresh rate
     loop {
-        // Check if there's an active job to determine refresh rate
-        let has_active_job = app.jobs.iter().any(|j| j.status == JobStatus::Running);
-        
-        // Refresh data
+        // Refresh data first to get latest job status
         app.refresh()?;
 
         // Draw UI
         terminal.draw(|f| ui(f, &mut app))?;
 
+        // Determine refresh rate based on current state (after refresh)
+        // Check if there's an active job to determine refresh rate
+        let has_active_job = app.jobs.iter().any(|j| j.status == JobStatus::Running);
+        
+        // Check if there are pending jobs without metadata (background extraction might be happening)
+        let has_pending_jobs_without_metadata = app.jobs.iter()
+            .any(|j| j.status == JobStatus::Pending && 
+                 (!has_estimation_metadata(j)));
+        
         // Handle input with adaptive timeout
-        // Faster refresh (1s) when active, slower (5s) when idle
+        // Refresh more frequently if:
+        // - Active transcoding job (1s)
+        // - Pending jobs without metadata (background extraction happening - 500ms)
+        // - Otherwise idle (5s)
         let poll_timeout = if has_active_job {
-            Duration::from_millis(1000)  // 1 second when active
+            Duration::from_millis(1000)  // 1 second when transcoding
+        } else if has_pending_jobs_without_metadata {
+            Duration::from_millis(500)   // 500ms when metadata extraction is happening
         } else {
             Duration::from_millis(5000)  // 5 seconds when idle
         };
