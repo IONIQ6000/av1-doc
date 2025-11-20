@@ -190,7 +190,7 @@ async fn main() -> Result<()> {
                 info!("   {} pending job(s) will start after current job(s) finish", pending_count);
                 
                 // Extract metadata for pending jobs in background (for EST SAVE calculation in TUI)
-                // Only extract metadata for jobs that don't have it yet
+                // Process multiple jobs in parallel (ffprobe is lightweight)
                 let pending_jobs_without_metadata: Vec<Job> = jobs.iter()
                     .filter(|j| j.status == JobStatus::Pending)
                     .filter(|j| {
@@ -201,24 +201,26 @@ async fn main() -> Result<()> {
                         j.video_bitrate.is_none() || 
                         j.video_frame_rate.is_none()
                     })
-                    .take(1) // Only process one at a time to avoid overloading
+                    .take(5) // Process up to 5 jobs per scan interval (ffprobe is lightweight)
                     .cloned()
                     .collect();
                 
                 if !pending_jobs_without_metadata.is_empty() {
-                    let job = &pending_jobs_without_metadata[0];
-                    info!("📊 Extracting metadata for pending job {} in background (for EST SAVE)...", job.id);
-                    let cfg_clone = cfg.clone();
-                    let job_id = job.id.clone();
-                    let job_path = job.source_path.clone();
-                    let job_state_dir = cfg.job_state_dir.clone();
+                    info!("📊 Extracting metadata for {} pending job(s) in background (for EST SAVE)...", pending_jobs_without_metadata.len());
                     
-                    // Spawn background task to extract metadata
-                    tokio::spawn(async move {
-                        if let Err(e) = extract_metadata_for_job(&cfg_clone, &job_id, &job_path, &job_state_dir).await {
-                            warn!("Failed to extract metadata for pending job {}: {}", job_id, e);
-                        }
-                    });
+                    // Spawn background tasks for each job
+                    for job in pending_jobs_without_metadata {
+                        let cfg_clone = cfg.clone();
+                        let job_id = job.id.clone();
+                        let job_path = job.source_path.clone();
+                        let job_state_dir = cfg.job_state_dir.clone();
+                        
+                        tokio::spawn(async move {
+                            if let Err(e) = extract_metadata_for_job(&cfg_clone, &job_id, &job_path, &job_state_dir).await {
+                                warn!("Failed to extract metadata for pending job {}: {}", job_id, e);
+                            }
+                        });
+                    }
                 }
             }
         }
