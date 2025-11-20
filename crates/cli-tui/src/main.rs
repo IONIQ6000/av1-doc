@@ -697,18 +697,24 @@ impl App {
             
             // Process Pending and Running jobs - calculate estimates when metadata is available
             // Check if job has metadata for estimation
-            if has_estimation_metadata(job) {
+            let has_metadata = has_estimation_metadata(job);
+            let was_cached_none = self.estimated_savings_cache.get(&job.id) == Some(&None);
+            
+            if has_metadata {
                 // Always recalculate if we have metadata - this ensures:
                 // 1. Estimates appear when metadata is first extracted (background or during transcoding)
                 // 2. Estimates update when quality setting is added
                 // 3. Estimates are always current with the latest job metadata
+                // Also force recalculation if it was previously cached as None (metadata just became available)
                 let estimate = estimate_space_savings(job);
                 self.estimated_savings_cache.insert(job.id.clone(), estimate);
             } else {
                 // Job doesn't have metadata yet - store None to mark that we've checked
                 // This will be updated when metadata becomes available (after background extraction)
-                // Clear any cached estimate if metadata is missing (shouldn't happen, but be safe)
-                self.estimated_savings_cache.insert(job.id.clone(), None);
+                // Only update if not already cached (avoid overwriting valid estimates)
+                if !self.estimated_savings_cache.contains_key(&job.id) {
+                    self.estimated_savings_cache.insert(job.id.clone(), None);
+                }
             }
         }
         
@@ -788,19 +794,25 @@ fn main() -> Result<()> {
         let has_active_job = app.jobs.iter().any(|j| j.status == JobStatus::Running);
         
         // Check if there are pending jobs without metadata (background extraction might be happening)
-        let has_pending_jobs_without_metadata = app.jobs.iter()
-            .any(|j| j.status == JobStatus::Pending && 
-                 (!has_estimation_metadata(j)));
+        let pending_count = app.jobs.iter()
+            .filter(|j| j.status == JobStatus::Pending)
+            .count();
+        let pending_without_metadata = app.jobs.iter()
+            .filter(|j| j.status == JobStatus::Pending && !has_estimation_metadata(j))
+            .count();
+        let pending_with_metadata = pending_count - pending_without_metadata;
         
         // Handle input with adaptive timeout
         // Refresh more frequently if:
         // - Active transcoding job (1s)
-        // - Pending jobs without metadata (background extraction happening - 500ms)
+        // - There are pending jobs (refresh frequently to catch metadata updates - 250ms)
         // - Otherwise idle (5s)
         let poll_timeout = if has_active_job {
             Duration::from_millis(1000)  // 1 second when transcoding
-        } else if has_pending_jobs_without_metadata {
-            Duration::from_millis(500)   // 500ms when metadata extraction is happening
+        } else if pending_count > 0 {
+            // Refresh very frequently when there are pending jobs to catch metadata extraction
+            // Keep refreshing quickly even if some jobs already have metadata (others might be extracting)
+            Duration::from_millis(250)   // 250ms when there are pending jobs
         } else {
             Duration::from_millis(5000)  // 5 seconds when idle
         };
