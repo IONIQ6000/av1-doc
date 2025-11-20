@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use chrono::Utc;
+use chrono::{Utc, DateTime};
 use daemon::{config::TranscodeConfig, job::{Job, JobStatus, load_all_jobs}};
 use ratatui::{
     backend::CrosstermBackend,
@@ -12,8 +12,59 @@ use ratatui::{
 use std::io::stdout;
 use std::path::PathBuf;
 use std::time::Duration;
+use std::collections::HashMap;
 use sysinfo::System;
 use humansize::{format_size, DECIMAL};
+
+/// Job stage detection for progress tracking
+#[derive(Debug, Clone, PartialEq)]
+enum JobStage {
+    Probing,        // Running ffprobe
+    Transcoding,    // Running ffmpeg (has temp file, size growing)
+    Verifying,      // Temp file complete, checking sizes/verifying
+    Replacing,      // Replacing original file
+    Complete,       // Job finished
+}
+
+impl JobStage {
+    fn as_str(&self) -> &'static str {
+        match self {
+            JobStage::Probing => "Probing",
+            JobStage::Transcoding => "Transcoding",
+            JobStage::Verifying => "Verifying",
+            JobStage::Replacing => "Replacing",
+            JobStage::Complete => "Complete",
+        }
+    }
+}
+
+/// Progress tracking for a running job
+#[derive(Clone)]
+struct JobProgress {
+    temp_file_path: PathBuf,
+    temp_file_size: u64,
+    original_size: u64,
+    last_updated: DateTime<Utc>,
+    bytes_per_second: f64,  // Estimated write rate
+    estimated_completion: Option<DateTime<Utc>>,  // ETA
+    stage: JobStage,  // Current stage (ffprobe, transcoding, verifying, etc.)
+    progress_percent: f64,  // Progress percentage (0-100)
+}
+
+impl JobProgress {
+    fn new(temp_file_path: PathBuf, original_size: u64) -> Self {
+        Self {
+            temp_file_path,
+            temp_file_size: 0,
+            original_size,
+            last_updated: Utc::now(),
+            bytes_per_second: 0.0,
+            estimated_completion: None,
+            stage: JobStage::Probing,
+            progress_percent: 0.0,
+        }
+    }
+}
 
 /// Validate that job has all required metadata for estimation
 fn has_estimation_metadata(job: &Job) -> bool {
@@ -126,6 +177,9 @@ struct App {
     table_state: TableState,
     should_quit: bool,
     job_state_dir: PathBuf,
+    job_progress: HashMap<String, JobProgress>,  // Track progress for running jobs
+    last_refresh: DateTime<Utc>,  // Last refresh timestamp
+    last_job_count: usize,  // Track job count changes for activity detection
 }
 
 impl App {
@@ -136,6 +190,9 @@ impl App {
             table_state: TableState::default(),
             should_quit: false,
             job_state_dir,
+            job_progress: HashMap::new(),
+            last_refresh: Utc::now(),
+            last_job_count: 0,
         }
     }
     
@@ -298,25 +355,274 @@ impl App {
         0.0
     }
 
+    /// Detect progress for a running job by checking temp file state
+    fn detect_job_progress(&mut self, job: &Job) {
+        use std::fs;
+        use chrono::Duration as ChronoDuration;
+        
+        // Only track Running jobs
+        if job.status != JobStatus::Running {
+            // Remove from tracking if not running anymore
+            self.job_progress.remove(&job.id);
+            return;
+        }
+        
+        let now = Utc::now();
+        let temp_output = job.source_path.with_extension("tmp.av1.mkv");
+        let orig_backup = job.source_path.with_extension("orig.mkv");
+        
+        // Get original size
+        let original_size = job.original_bytes.unwrap_or(0);
+        
+        // Check if temp file exists
+        if let Ok(metadata) = fs::metadata(&temp_output) {
+            let current_temp_size = metadata.len();
+            let temp_file_modified_time = metadata.modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+            
+            // Get or create progress tracking
+            let mut progress = self.job_progress.get(&job.id)
+                .cloned()
+                .unwrap_or_else(|| JobProgress::new(temp_output.clone(), original_size));
+            
+            // Calculate bytes per second if we have previous data
+            let time_delta_seconds = (now - progress.last_updated).num_seconds().max(1) as f64;
+            if time_delta_seconds > 0.0 && current_temp_size > progress.temp_file_size {
+                let bytes_delta = current_temp_size - progress.temp_file_size;
+                progress.bytes_per_second = bytes_delta as f64 / time_delta_seconds;
+            }
+            
+            // Update progress tracking
+            progress.temp_file_size = current_temp_size;
+            progress.last_updated = now;
+            
+            // Estimate output size based on codec efficiency
+            let estimated_output_size = if let Some(codec) = &job.video_codec {
+                let efficiency_factor = match codec.to_lowercase().as_str() {
+                    "hevc" | "h265" => 0.55,
+                    "h264" | "avc" => 0.40,
+                    "vp9" => 0.85,
+                    "av1" => 1.0,
+                    _ => 0.5, // Default conservative estimate
+                };
+                (original_size as f64 * efficiency_factor) as u64
+            } else {
+                (original_size as f64 * 0.5) as u64 // Default 50% if codec unknown
+            };
+            
+            // Calculate progress percentage
+            if estimated_output_size > 0 {
+                progress.progress_percent = (current_temp_size as f64 / estimated_output_size as f64 * 100.0)
+                    .min(100.0)
+                    .max(0.0);
+            }
+            
+            // Calculate ETA if we have a write rate
+            if progress.bytes_per_second > 0.0 && estimated_output_size > current_temp_size {
+                let remaining_bytes = estimated_output_size - current_temp_size;
+                let seconds_remaining = remaining_bytes as f64 / progress.bytes_per_second;
+                progress.estimated_completion = Some(now + ChronoDuration::seconds(seconds_remaining as i64));
+            }
+            
+            // Detect stage based on temp file state
+            // Check if temp file is still being written (modified recently)
+            if let Some(modified_time_secs) = temp_file_modified_time {
+                let now_secs = now.timestamp();
+                let seconds_since_mod = (now_secs - modified_time_secs).max(0);
+                if seconds_since_mod < 10 {
+                    // File modified in last 10 seconds - actively transcoding
+                    progress.stage = JobStage::Transcoding;
+                } else {
+                    // File not modified recently - may be verifying or stuck
+                    if progress.progress_percent > 95.0 {
+                        progress.stage = JobStage::Verifying;
+                    } else {
+                        progress.stage = JobStage::Transcoding; // Still transcoding, just slow
+                    }
+                }
+            } else {
+                progress.stage = JobStage::Transcoding;
+            }
+            
+            // Check if original file has been replaced (backup exists)
+            if orig_backup.exists() && !job.source_path.exists() {
+                progress.stage = JobStage::Replacing;
+            }
+            
+            self.job_progress.insert(job.id.clone(), progress);
+        } else {
+            // Temp file doesn't exist yet
+            // Check how long job has been running
+            if let Some(started) = job.started_at {
+                let elapsed = (now - started).num_seconds();
+                if elapsed < 30 {
+                    // Recently started, probably still probing
+                    let progress = JobProgress::new(temp_output.clone(), original_size);
+                    self.job_progress.insert(job.id.clone(), progress);
+                } else {
+                    // Running for >30s without temp file - may be stuck
+                    // Still track it as probing for now
+                    let mut progress = JobProgress::new(temp_output.clone(), original_size);
+                    progress.stage = JobStage::Probing;
+                    self.job_progress.insert(job.id.clone(), progress);
+                }
+            } else {
+                // No started_at - create basic progress tracking
+                let mut progress = JobProgress::new(temp_output.clone(), original_size);
+                progress.stage = JobStage::Probing;
+                self.job_progress.insert(job.id.clone(), progress);
+            }
+        }
+    }
+    
     fn refresh(&mut self) -> Result<()> {
         // Refresh system info
         self.system.refresh_all();
-
+        
         // Reload jobs
         match load_all_jobs(&self.job_state_dir) {
             Ok(jobs) => {
                 self.jobs = jobs;
                 // Sort by creation time (newest first)
                 self.jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                self.last_job_count = self.jobs.len();
             }
             Err(_e) => {
                 // Silently fail - show empty table
                 // Errors are visible in the UI (empty table, status counts)
                 self.jobs = Vec::new();
+                self.last_job_count = 0;
             }
         }
 
+        // Collect all running job data before iterating to avoid borrow checker issues
+        let now = Utc::now();
+        let running_job_ids: Vec<String> = self.jobs.iter()
+            .filter(|j| j.status == JobStatus::Running)
+            .map(|j| j.id.clone())
+            .collect();
+
+        // Update progress tracking for all running jobs by cloning necessary data
+        for job_id in &running_job_ids {
+            // Collect job data we need before calling detect_job_progress
+            let job_data: Option<(PathBuf, Option<u64>, Option<DateTime<Utc>>, Option<String>, JobStatus)> = 
+                self.jobs.iter()
+                    .find(|j| j.id == *job_id)
+                    .map(|j| (j.source_path.clone(), j.original_bytes, j.started_at, j.video_codec.clone(), j.status.clone()));
+            
+            if let Some((source_path, original_bytes, started_at, video_codec, status)) = job_data {
+                // Create a temporary job-like structure to pass progress detection info
+                // Since we can't mutate self while iterating, we'll update progress directly
+                let temp_output = source_path.with_extension("tmp.av1.mkv");
+                let original_size = original_bytes.unwrap_or(0);
+                
+                // Check if temp file exists and update progress
+                if let Ok(metadata) = std::fs::metadata(&temp_output) {
+                    let current_temp_size = metadata.len();
+                    
+                    // Get or create progress tracking
+                    let mut progress = self.job_progress.get(job_id)
+                        .cloned()
+                        .unwrap_or_else(|| JobProgress::new(temp_output.clone(), original_size));
+                    
+                    // Calculate bytes per second
+                    let time_delta_seconds = (now - progress.last_updated).num_seconds().max(1) as f64;
+                    if time_delta_seconds > 0.0 && current_temp_size > progress.temp_file_size {
+                        let bytes_delta = current_temp_size - progress.temp_file_size;
+                        progress.bytes_per_second = bytes_delta as f64 / time_delta_seconds;
+                    }
+                    
+                    // Update progress tracking
+                    progress.temp_file_size = current_temp_size;
+                    progress.last_updated = now;
+                    
+                    // Estimate output size
+                    let estimated_output_size = if let Some(codec) = &video_codec {
+                        let efficiency_factor = match codec.to_lowercase().as_str() {
+                            "hevc" | "h265" => 0.55,
+                            "h264" | "avc" => 0.40,
+                            "vp9" => 0.85,
+                            "av1" => 1.0,
+                            _ => 0.5,
+                        };
+                        (original_size as f64 * efficiency_factor) as u64
+                    } else {
+                        (original_size as f64 * 0.5) as u64
+                    };
+                    
+                    // Calculate progress percentage
+                    if estimated_output_size > 0 {
+                        progress.progress_percent = (current_temp_size as f64 / estimated_output_size as f64 * 100.0)
+                            .min(100.0)
+                            .max(0.0);
+                    }
+                    
+                    // Calculate ETA
+                    if progress.bytes_per_second > 0.0 && estimated_output_size > current_temp_size {
+                        use chrono::Duration as ChronoDuration;
+                        let remaining_bytes = estimated_output_size - current_temp_size;
+                        let seconds_remaining = remaining_bytes as f64 / progress.bytes_per_second;
+                        progress.estimated_completion = Some(now + ChronoDuration::seconds(seconds_remaining as i64));
+                    }
+                    
+                    // Detect stage
+                    progress.stage = JobStage::Transcoding;
+                    if progress.progress_percent > 95.0 {
+                        progress.stage = JobStage::Verifying;
+                    }
+                    
+                    self.job_progress.insert(job_id.clone(), progress);
+                } else {
+                    // No temp file yet - probing stage
+                    if let Some(started) = started_at {
+                        let elapsed = (now - started).num_seconds();
+                        if elapsed < 30 {
+                            let progress = JobProgress::new(temp_output.clone(), original_size);
+                            self.job_progress.insert(job_id.clone(), progress);
+                        } else {
+                            let mut progress = JobProgress::new(temp_output.clone(), original_size);
+                            progress.stage = JobStage::Probing;
+                            self.job_progress.insert(job_id.clone(), progress);
+                        }
+                    } else {
+                        let mut progress = JobProgress::new(temp_output.clone(), original_size);
+                        progress.stage = JobStage::Probing;
+                        self.job_progress.insert(job_id.clone(), progress);
+                    }
+                }
+            }
+        }
+        
+        // Clean up progress tracking for jobs that are no longer running
+        let running_ids_set: std::collections::HashSet<_> = running_job_ids.iter().collect();
+        self.job_progress.retain(|id, _| running_ids_set.contains(id));
+        
+        self.last_refresh = now;
+        
         Ok(())
+    }
+    
+    /// Get activity status based on job state changes and running jobs
+    fn get_activity_status(&self) -> (&'static str, Color) {
+        let running_count = self.jobs.iter()
+            .filter(|j| j.status == JobStatus::Running)
+            .count();
+        
+        if running_count > 0 {
+            ("⚙️  Processing", Color::Green)
+        } else {
+            let pending_count = self.jobs.iter()
+                .filter(|j| j.status == JobStatus::Pending)
+                .count();
+            
+            if pending_count > 0 {
+                ("💤 Idle", Color::Yellow)
+            } else {
+                ("💤 Idle", Color::Blue)
+            }
+        }
     }
 
     fn count_by_status(&self, status: JobStatus) -> usize {
@@ -352,16 +658,26 @@ fn main() -> Result<()> {
     // Create app
     let mut app = App::new(cfg.job_state_dir.clone());
 
-    // Main event loop
+    // Main event loop with adaptive refresh rate
     loop {
+        // Check if there's an active job to determine refresh rate
+        let has_active_job = app.jobs.iter().any(|j| j.status == JobStatus::Running);
+        
         // Refresh data
         app.refresh()?;
 
         // Draw UI
         terminal.draw(|f| ui(f, &mut app))?;
 
-        // Handle input
-        if crossterm::event::poll(Duration::from_millis(100))? {
+        // Handle input with adaptive timeout
+        // Faster refresh (1s) when active, slower (5s) when idle
+        let poll_timeout = if has_active_job {
+            Duration::from_millis(1000)  // 1 second when active
+        } else {
+            Duration::from_millis(5000)  // 5 seconds when idle
+        };
+        
+        if crossterm::event::poll(poll_timeout)? {
             if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
                 match key.code {
                     crossterm::event::KeyCode::Char('q') => {
@@ -417,7 +733,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Create vertical layout with explicit constraints
     // Use exact calculations to prevent overlap
     let top_height = 3;
-    let current_job_height = if running_job.is_some() { 5 } else { 0 }; // Increased to 5 lines for 3 lines of text + borders
+    let current_job_height = if running_job.is_some() { 6 } else { 0 }; // 3 lines of text + 1 progress bar + 2 borders
     let bottom_height = 3;
     let available_height = size.height.saturating_sub(top_height + current_job_height + bottom_height);
     
@@ -462,14 +778,8 @@ fn ui(f: &mut Frame, app: &mut App) {
 
 fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
     if let Some(job) = app.jobs.iter().find(|j| j.status == JobStatus::Running) {
-        // Status
-        let status_str = match job.status {
-            JobStatus::Pending => "PEND",
-            JobStatus::Running => "RUN",
-            JobStatus::Success => "OK",
-            JobStatus::Failed => "FAIL",
-            JobStatus::Skipped => "SKIP",
-        };
+        // Get progress tracking if available
+        let progress = app.job_progress.get(&job.id);
         
         // File name
         let file_name = job.source_path
@@ -483,65 +793,100 @@ fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
             .map(|b| format_size(b, DECIMAL))
             .unwrap_or_else(|| "-".to_string());
         
-        // New size
-        let new_size = job.new_bytes
-            .map(|b| format_size(b, DECIMAL))
-            .unwrap_or_else(|| "-".to_string());
-        
-        // Savings percentage (actual if completed, estimated if pending/running)
-        let savings = if let (Some(orig), Some(new)) = (job.original_bytes, job.new_bytes) {
-            // Actual savings if transcoding is complete
-            if orig > 0 {
-                let pct = ((orig - new) as f64 / orig as f64) * 100.0;
-                format!("{:.1}%", pct)
+        // New size (use progress temp file size if available)
+        let new_size = if let Some(prog) = progress {
+            if prog.temp_file_size > 0 {
+                format_size(prog.temp_file_size, DECIMAL)
             } else {
                 "-".to_string()
             }
         } else {
-            // Estimate savings if not yet transcoded
-            if has_estimation_metadata(job) {
-                if let Some(savings_gb) = estimate_space_savings_gb(job) {
-                    format!("~{:.1}GB", savings_gb)
-                } else {
-                    "calc?".to_string() // Calculation failed despite having metadata
-                }
-            } else {
-                // Show what's missing for debugging
-                let missing = vec![
-                    if job.original_bytes.is_none() { "orig" } else { "" },
-                    if job.video_codec.is_none() { "codec" } else { "" },
-                    if job.video_width.is_none() { "w" } else { "" },
-                    if job.video_height.is_none() { "h" } else { "" },
-                    if job.video_bitrate.is_none() { "br" } else { "" },
-                    if job.video_frame_rate.is_none() { "fps" } else { "" },
-                ].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(",");
-                format!("-{}", truncate_string(&missing, 10))
-            }
+            job.new_bytes
+                .map(|b| format_size(b, DECIMAL))
+                .unwrap_or_else(|| "-".to_string())
         };
         
-        // Duration/Elapsed time
-        let duration = if let Some(started) = job.started_at {
-            if let Some(finished) = job.finished_at {
-                // Job finished, show total duration
-                let dur = finished - started;
-                format!("{}s", dur.num_seconds())
+        // Current stage
+        let stage_str = if let Some(prog) = progress {
+            prog.stage.as_str()
+        } else {
+            "Starting"
+        };
+        
+        // Progress percentage
+        let progress_pct = if let Some(prog) = progress {
+            prog.progress_percent
+        } else {
+            0.0
+        };
+        
+        // ETA
+        let eta_str = if let Some(prog) = progress {
+            if let Some(eta) = prog.estimated_completion {
+                let remaining = (eta - Utc::now()).num_seconds();
+                if remaining > 0 {
+                    let hours = remaining / 3600;
+                    let minutes = (remaining % 3600) / 60;
+                    let seconds = remaining % 60;
+                    if hours > 0 {
+                        format!("{}h {}m", hours, minutes)
+                    } else if minutes > 0 {
+                        format!("{}m {}s", minutes, seconds)
+                    } else {
+                        format!("{}s", seconds)
+                    }
+                } else {
+                    "Soon".to_string()
+                }
             } else {
-                // Job still running, show elapsed time
-                let dur = Utc::now() - started;
-                format!("{}s", dur.num_seconds())
+                "-".to_string()
             }
         } else {
             "-".to_string()
         };
         
-        // Reason
-        let reason = job.reason.as_deref().unwrap_or("-");
+        // Speed (bytes per second)
+        let speed_str = if let Some(prog) = progress {
+            if prog.bytes_per_second > 0.0 {
+                format!("{}/s", format_size(prog.bytes_per_second as u64, DECIMAL))
+            } else {
+                "-".to_string()
+            }
+        } else {
+            "-".to_string()
+        };
         
-        // Format as table-like display with all columns
+        // Duration/Elapsed time
+        let duration = if let Some(started) = job.started_at {
+            let dur = Utc::now() - started;
+            let hours = dur.num_hours();
+            let minutes = dur.num_minutes() % 60;
+            let seconds = dur.num_seconds() % 60;
+            if hours > 0 {
+                format!("{}h {}m", hours, minutes)
+            } else if minutes > 0 {
+                format!("{}m {}s", minutes, seconds)
+            } else {
+                format!("{}s", seconds)
+            }
+        } else {
+            "-".to_string()
+        };
+        
+        // Split area into text and progress bar
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),  // Text info
+                Constraint::Length(1),  // Progress bar
+            ])
+            .split(area);
+        
+        // Build info text
         let info_lines = vec![
-            format!("ST: {} | FILE: {}", status_str, truncate_string(&file_name, 50)),
-            format!("ORIG: {} | NEW: {} | EST SAVE: {} | TIME: {}", orig_size, new_size, savings, duration),
-            format!("REASON: {}", truncate_string(reason, 70)),
+            format!("STAGE: {} | FILE: {}", stage_str, truncate_string(&file_name, 50)),
+            format!("ORIG: {} | CURRENT: {} | PROGRESS: {:.1}% | ETA: {}", orig_size, new_size, progress_pct, eta_str),
+            format!("SPEED: {} | ELAPSED: {}", speed_str, duration),
         ];
         
         let paragraph = Paragraph::new(info_lines.join("\n"))
@@ -550,21 +895,52 @@ fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
                 .title("▶ CURRENT JOB")
                 .style(Style::default().fg(Color::Green)))
             .style(Style::default().fg(Color::Yellow));
+        f.render_widget(paragraph, chunks[0]);
         
-        f.render_widget(paragraph, area);
+        // Render progress bar
+        let progress_color = match stage_str {
+            "Transcoding" => Color::Green,
+            "Probing" | "Verifying" => Color::Yellow,
+            _ => Color::Cyan,
+        };
+        
+        let progress_percent_u16 = progress_pct.min(100.0).max(0.0) as u16;
+        let progress_gauge = Gauge::default()
+            .block(Block::default()
+                .borders(Borders::NONE)
+                .title(format!("Progress: {:.1}%", progress_pct)))
+            .gauge_style(Style::default().fg(progress_color))
+            .percent(progress_percent_u16)
+            .label(format!("{:.1}%", progress_pct));
+        f.render_widget(progress_gauge, chunks[1]);
     }
 }
 
 fn render_top_bar(f: &mut Frame, app: &App, area: Rect) {
-    // Split top bar into three equal parts for CPU, Memory, and GPU
+    // Split top bar into four parts: Activity, CPU, Memory, and GPU
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(33),
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
+            Constraint::Length(16),  // Activity status
+            Constraint::Percentage(28),
+            Constraint::Percentage(36),
+            Constraint::Percentage(36),
         ])
         .split(area);
+    
+    // Render activity status
+    let (activity_text, activity_color) = app.get_activity_status();
+    let activity_block = Block::default()
+        .borders(Borders::ALL)
+        .title("Status")
+        .style(Style::default().fg(activity_color));
+    let activity_paragraph = Paragraph::new(activity_text)
+        .block(activity_block)
+        .style(Style::default().fg(activity_color));
+    f.render_widget(activity_paragraph, chunks[0]);
+    
+    // Adjust chunk indices for remaining gauges
+    let gauge_chunks = &chunks[1..];
 
     // Get CPU usage and clamp to 0-100 range
     let cpu_raw = app.system.global_cpu_usage();
@@ -595,7 +971,7 @@ fn render_top_bar(f: &mut Frame, app: &App, area: Rect) {
         .gauge_style(Style::default().fg(Color::Cyan))
         .percent(cpu_percent_u16)
         .label(format!("{:.1}%", cpu_usage));
-    f.render_widget(cpu_gauge, chunks[0]);
+    f.render_widget(cpu_gauge, gauge_chunks[0]);
 
     // Memory gauge
     let memory_percent_u16 = memory_percent.min(100.0).max(0.0) as u16;
@@ -604,7 +980,7 @@ fn render_top_bar(f: &mut Frame, app: &App, area: Rect) {
         .gauge_style(Style::default().fg(Color::Green))
         .percent(memory_percent_u16)
         .label(format!("{:.1}%", memory_percent));
-    f.render_widget(memory_gauge, chunks[1]);
+    f.render_widget(memory_gauge, gauge_chunks[1]);
 
     // GPU gauge
     let gpu_usage = app.get_gpu_usage();
@@ -614,7 +990,7 @@ fn render_top_bar(f: &mut Frame, app: &App, area: Rect) {
         .gauge_style(Style::default().fg(Color::Magenta))
         .percent(gpu_percent_u16)
         .label(format!("{:.1}%", gpu_usage));
-    f.render_widget(gpu_gauge, chunks[2]);
+    f.render_widget(gpu_gauge, gauge_chunks[2]);
 }
 
 fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
@@ -827,3 +1203,4 @@ fn truncate_string(s: &str, max_len: usize) -> String {
         format!("{}...", &s[..max_len.saturating_sub(3)])
     }
 }
+

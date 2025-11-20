@@ -58,6 +58,19 @@ async fn main() -> Result<()> {
     fs::create_dir_all(&cfg.job_state_dir)
         .with_context(|| format!("Failed to create job state directory: {}", cfg.job_state_dir.display()))?;
 
+    // Recovery on startup: check for stuck jobs and orphaned temp files
+    info!("🔄 Starting recovery checks...");
+    let recovered_count = recover_stuck_jobs(&cfg).await
+        .context("Failed to recover stuck jobs on startup")?;
+    let cleaned_count = cleanup_orphaned_temp_files(&cfg).await
+        .context("Failed to cleanup orphaned temp files on startup")?;
+    if recovered_count > 0 || cleaned_count > 0 {
+        info!("✅ Startup recovery complete: {} job(s) recovered, {} temp file(s) cleaned", 
+              recovered_count, cleaned_count);
+    } else {
+        info!("✅ Startup recovery complete: no stuck jobs or orphaned files found");
+    }
+
     // Main daemon loop
     loop {
         info!("Starting library scan...");
@@ -112,6 +125,13 @@ async fn main() -> Result<()> {
 
         info!("Scan summary: {} candidates, {} skipped, {} new jobs created", 
               candidates_count, skipped_count, new_jobs_count);
+
+        // Periodic stuck job check - recover any stuck jobs before processing
+        let _recovered_count = recover_stuck_jobs(&cfg).await
+            .context("Failed to check for stuck jobs")?;
+        if _recovered_count > 0 {
+            info!("⚠️  Recovered {} stuck job(s) during periodic check", _recovered_count);
+        }
 
         // Process pending jobs
         let mut jobs = load_all_jobs(&cfg.job_state_dir)
@@ -170,6 +190,226 @@ async fn main() -> Result<()> {
         info!("Sleeping for {} seconds before next scan", cfg.scan_interval_secs);
         tokio::time::sleep(tokio::time::Duration::from_secs(cfg.scan_interval_secs)).await;
     }
+}
+
+/// Recover stuck jobs - check for jobs in Running status that are actually abandoned
+/// Returns the number of jobs recovered
+async fn recover_stuck_jobs(cfg: &TranscodeConfig) -> Result<usize> {
+    info!("🔍 Checking for stuck jobs...");
+    
+    let jobs = load_all_jobs(&cfg.job_state_dir)
+        .context("Failed to load jobs for recovery")?;
+    
+    let stuck_timeout = chrono::Duration::hours(1); // Jobs older than 1 hour are considered stuck
+    let mut recovered_count = 0;
+    let now = Utc::now();
+    
+    for mut job in jobs {
+        if job.status != JobStatus::Running {
+            continue;
+        }
+        
+        // Check if job is stuck based on age
+        let age = if let Some(started) = job.started_at {
+            now - started
+        } else {
+            // Job has Running status but no started_at - definitely stuck
+            warn!("Job {}: Has Running status but no started_at timestamp - marking as stuck", job.id);
+            let temp_output = job.source_path.with_extension("tmp.av1.mkv");
+            let orig_backup = job.source_path.with_extension("orig.mkv");
+            
+            // Clean up temp file if it exists
+            if temp_output.exists() {
+                fs::remove_file(&temp_output)
+                    .with_context(|| format!("Failed to delete temp file: {}", temp_output.display()))?;
+                info!("Job {}: 🗑️  Deleted abandoned temp file: {}", job.id, temp_output.display());
+            }
+            
+            // Restore backup if original is missing
+            if !job.source_path.exists() && orig_backup.exists() {
+                fs::rename(&orig_backup, &job.source_path)
+                    .with_context(|| format!("Failed to restore backup: {} -> {}", 
+                        orig_backup.display(), job.source_path.display()))?;
+                info!("Job {}: 🔄 Restored original from backup: {}", job.id, job.source_path.display());
+            } else if !job.source_path.exists() && !orig_backup.exists() {
+                // Original missing, no backup - corrupted state
+                error!("Job {}: ❌ Original file missing with no backup - marking as Failed", job.id);
+                job.status = JobStatus::Failed;
+                job.reason = Some("recovery: original file missing, no backup available".to_string());
+                job.finished_at = Some(now);
+                save_job(&job, &cfg.job_state_dir)?;
+                recovered_count += 1;
+                continue;
+            }
+            
+            // Reset to Pending
+            job.status = JobStatus::Pending;
+            job.started_at = None;
+            save_job(&job, &cfg.job_state_dir)?;
+            info!("Job {}: 🔄 Reset to Pending (no started_at)", job.id);
+            recovered_count += 1;
+            continue;
+        };
+        
+        // Check if job has been running too long
+        if age > stuck_timeout {
+            warn!("Job {}: ⚠️  Found stuck job - running for {} (threshold: {} hours)", 
+                  job.id, format_duration(age), stuck_timeout.num_hours());
+            
+            let temp_output = job.source_path.with_extension("tmp.av1.mkv");
+            let orig_backup = job.source_path.with_extension("orig.mkv");
+            
+            // Clean up temp file if it exists (abandoned transcode)
+            if temp_output.exists() {
+                fs::remove_file(&temp_output)
+                    .with_context(|| format!("Failed to delete temp file: {}", temp_output.display()))?;
+                info!("Job {}: 🗑️  Deleted abandoned temp file: {}", job.id, temp_output.display());
+            }
+            
+            // Check file states and recover appropriately
+            let orig_exists = job.source_path.exists();
+            let backup_exists = orig_backup.exists();
+            
+            if !orig_exists && backup_exists {
+                // Failed replacement - restore backup
+                fs::rename(&orig_backup, &job.source_path)
+                    .with_context(|| format!("Failed to restore backup: {} -> {}", 
+                        orig_backup.display(), job.source_path.display()))?;
+                info!("Job {}: 🔄 Restored original from backup: {}", job.id, job.source_path.display());
+                job.status = JobStatus::Pending;
+                job.started_at = None;
+            } else if !orig_exists && !backup_exists {
+                // Original missing, no backup - corrupted state
+                error!("Job {}: ❌ Original file missing with no backup - marking as Failed", job.id);
+                job.status = JobStatus::Failed;
+                job.reason = Some(format!("recovery: original file missing after {} (no backup)", format_duration(age)));
+                job.finished_at = Some(now);
+            } else if orig_exists {
+                // Original exists - can restart transcode
+                job.status = JobStatus::Pending;
+                job.started_at = None;
+            }
+            
+            save_job(&job, &cfg.job_state_dir)?;
+            info!("Job {}: 🔄 Recovered stuck job - reset to {:?}", job.id, job.status);
+            recovered_count += 1;
+        }
+    }
+    
+    if recovered_count > 0 {
+        info!("✅ Recovered {} stuck job(s)", recovered_count);
+    } else {
+        debug!("No stuck jobs found");
+    }
+    
+    Ok(recovered_count)
+}
+
+/// Helper function to format duration for logging
+fn format_duration(d: chrono::Duration) -> String {
+    let hours = d.num_hours();
+    let minutes = d.num_minutes() % 60;
+    let seconds = d.num_seconds() % 60;
+    format!("{}h {}m {}s", hours, minutes, seconds)
+}
+
+/// Clean up orphaned temp files that don't have active jobs
+/// Returns the number of files cleaned up
+async fn cleanup_orphaned_temp_files(cfg: &TranscodeConfig) -> Result<usize> {
+    info!("🔍 Checking for orphaned temp files...");
+    
+    // Load all jobs to check against
+    let jobs = load_all_jobs(&cfg.job_state_dir)
+        .context("Failed to load jobs for cleanup")?;
+    
+    // Create set of source paths that have active jobs
+    let active_paths: HashSet<_> = jobs
+        .iter()
+        .filter(|j| matches!(j.status, JobStatus::Pending | JobStatus::Running))
+        .map(|j| &j.source_path)
+        .collect();
+    
+    let mut cleaned_count = 0;
+    
+    // Scan library roots for temp files
+    for root in &cfg.library_roots {
+        if !root.exists() {
+            continue;
+        }
+        
+        // Use walkdir in blocking task to find temp files
+        let temp_files = tokio::task::spawn_blocking({
+            let root = root.clone();
+            move || {
+                let mut temp_files = Vec::new();
+                for entry in walkdir::WalkDir::new(&root)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                            if file_name.contains(".tmp.av1.") || file_name.ends_with(".tmp.av1.mkv") {
+                                temp_files.push(path.to_path_buf());
+                            }
+                        }
+                    }
+                }
+                temp_files
+            }
+        }).await.context("Failed to scan for temp files")?;
+        
+        for temp_file in temp_files {
+            // Try to find corresponding source path (remove .tmp.av1.mkv extension)
+            // Example: "movie.tmp.av1.mkv" -> "movie.mkv"
+            let source_path = if let Some(file_name) = temp_file.file_stem().and_then(|s| s.to_str()) {
+                // file_name would be "movie.tmp.av1" for "movie.tmp.av1.mkv"
+                if let Some(parent) = temp_file.parent() {
+                    if file_name.ends_with(".tmp.av1") {
+                        // Remove ".tmp.av1" suffix
+                        let base_name = &file_name[..file_name.len() - 8]; // ".tmp.av1" is 8 chars
+                        parent.join(format!("{}.mkv", base_name))
+                    } else {
+                        // Fallback: just replace .tmp.av1 in the full file name
+                        let mut source_path = temp_file.clone();
+                        if let Some(file_name_str) = temp_file.file_name().and_then(|n| n.to_str()) {
+                            let new_name = file_name_str.replace(".tmp.av1.", ".").replace(".tmp.av1", "");
+                            source_path.set_file_name(&new_name);
+                        }
+                        source_path
+                    }
+                } else {
+                    temp_file.clone()
+                }
+            } else {
+                temp_file.clone()
+            };
+            
+            // Check if this temp file has an active job
+            let has_active_job = active_paths.contains(&source_path) || 
+                                 jobs.iter().any(|j| {
+                                     // Also check if temp file matches any job's expected temp path
+                                     j.source_path.with_extension("tmp.av1.mkv") == temp_file
+                                 });
+            
+            if !has_active_job {
+                // Orphaned temp file - delete it
+                fs::remove_file(&temp_file)
+                    .with_context(|| format!("Failed to delete orphaned temp file: {}", temp_file.display()))?;
+                info!("🗑️  Deleted orphaned temp file: {}", temp_file.display());
+                cleaned_count += 1;
+            }
+        }
+    }
+    
+    if cleaned_count > 0 {
+        info!("✅ Cleaned up {} orphaned temp file(s)", cleaned_count);
+    } else {
+        debug!("No orphaned temp files found");
+    }
+    
+    Ok(cleaned_count)
 }
 
 /// Process a single job: probe, classify, transcode, and apply size gate
