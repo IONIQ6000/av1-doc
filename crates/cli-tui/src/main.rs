@@ -702,12 +702,56 @@ impl App {
                 // This ensures estimates update when metadata becomes available (after ffprobe)
                 // or when quality setting is added during transcoding
                 let estimate = estimate_space_savings(job);
+                
+                // Debug logging (to stderr, won't interfere with TUI display)
+                if let Some((savings_gb, savings_pct)) = estimate {
+                    eprintln!(
+                        "[EST SAVE] Job {}: Calculated estimate: {:.1}GB ({:.0}%) | File: {}",
+                        &job.id[..8],
+                        savings_gb,
+                        savings_pct,
+                        job.source_path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("?")
+                    );
+                } else {
+                    eprintln!(
+                        "[EST SAVE] Job {}: Calculation returned None | File: {}",
+                        &job.id[..8],
+                        job.source_path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("?")
+                    );
+                }
+                
                 self.estimated_savings_cache.insert(job.id.clone(), estimate);
             } else {
                 // Job doesn't have metadata yet - store None to mark that we've checked
                 // This will be updated when metadata becomes available (after ffprobe)
                 // Only store None if not already cached (to avoid overwriting valid estimates)
                 if !self.estimated_savings_cache.contains_key(&job.id) {
+                    let missing: Vec<&str> = vec![
+                        if job.original_bytes.is_none() { Some("orig") } else { None },
+                        if job.video_codec.is_none() { Some("codec") } else { None },
+                        if job.video_width.is_none() { Some("width") } else { None },
+                        if job.video_height.is_none() { Some("height") } else { None },
+                        if job.video_bitrate.is_none() { Some("bitrate") } else { None },
+                        if job.video_frame_rate.is_none() { Some("fps") } else { None },
+                    ].into_iter().flatten().collect();
+                    let missing_str = if missing.is_empty() {
+                        "unknown".to_string()
+                    } else {
+                        missing.join(",")
+                    };
+                    
+                    eprintln!(
+                        "[EST SAVE] Job {}: Missing metadata, cannot calculate estimate | File: {} | Missing: {}",
+                        &job.id[..8],
+                        job.source_path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("?"),
+                        missing_str
+                    );
                     self.estimated_savings_cache.insert(job.id.clone(), None);
                 }
             }
