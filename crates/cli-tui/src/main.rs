@@ -179,6 +179,7 @@ struct App {
     job_state_dir: PathBuf,
     command_dir: PathBuf,  // Directory for writing command files
     job_progress: HashMap<String, JobProgress>,  // Track progress for running jobs
+    estimated_savings_cache: HashMap<String, Option<f64>>,  // job_id -> estimated_savings_gb (cached)
     last_refresh: DateTime<Utc>,  // Last refresh timestamp
     last_job_count: usize,  // Track job count changes for activity detection
     last_message: Option<String>,  // Status message to display
@@ -200,6 +201,7 @@ impl App {
             job_state_dir,
             command_dir,
             job_progress: HashMap::new(),
+            estimated_savings_cache: HashMap::new(),
             last_refresh: Utc::now(),
             last_job_count: 0,
             last_message: None,
@@ -668,6 +670,39 @@ impl App {
         let running_ids_set: std::collections::HashSet<_> = running_job_ids.iter().collect();
         self.job_progress.retain(|id, _| running_ids_set.contains(id));
         
+        // Update estimated savings cache for all jobs
+        // Calculate/update estimates for jobs that have metadata
+        for job in &self.jobs {
+            // Skip completed jobs - they have actual savings, not estimates
+            if job.status == JobStatus::Success || job.status == JobStatus::Failed || job.status == JobStatus::Skipped {
+                // Remove from cache if present (no longer needed)
+                self.estimated_savings_cache.remove(&job.id);
+                continue;
+            }
+            
+            // Check if job has metadata for estimation
+            if has_estimation_metadata(job) {
+                // Check if we need to recalculate (not cached or metadata might have changed)
+                let needs_update = !self.estimated_savings_cache.contains_key(&job.id);
+                
+                if needs_update {
+                    // Calculate and cache the estimate
+                    let estimate = estimate_space_savings_gb(job);
+                    self.estimated_savings_cache.insert(job.id.clone(), estimate);
+                }
+            } else {
+                // Job doesn't have metadata yet - store None to avoid recalculating
+                // This will be updated when metadata becomes available (after ffprobe)
+                if !self.estimated_savings_cache.contains_key(&job.id) {
+                    self.estimated_savings_cache.insert(job.id.clone(), None);
+                }
+            }
+        }
+        
+        // Clean up cache entries for jobs that no longer exist
+        let job_ids_set: std::collections::HashSet<_> = self.jobs.iter().map(|j| &j.id).collect();
+        self.estimated_savings_cache.retain(|id, _| job_ids_set.contains(id));
+        
         self.last_refresh = now;
         
         Ok(())
@@ -958,10 +993,26 @@ fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
             ])
             .split(area);
         
+        // Estimated savings (from cache or calculate on-the-fly)
+        let est_save_str = if let Some(cached_estimate) = app.estimated_savings_cache.get(&job.id) {
+            if let Some(savings_gb) = cached_estimate {
+                format!("~{:.1}GB", savings_gb)
+            } else {
+                "-".to_string()
+            }
+        } else {
+            // Not cached yet, try calculating on-the-fly
+            if let Some(savings_gb) = estimate_space_savings_gb(job) {
+                format!("~{:.1}GB", savings_gb)
+            } else {
+                "-".to_string()
+            }
+        };
+        
         // Build info text
         let info_lines = vec![
             format!("STAGE: {} | FILE: {}", stage_str, truncate_string(&file_name, 50)),
-            format!("ORIG: {} | CURRENT: {} | PROGRESS: {:.1}% | ETA: {}", orig_size, new_size, progress_pct, eta_str),
+            format!("ORIG: {} | CURRENT: {} | EST SAVE: {} | PROGRESS: {:.1}% | ETA: {}", orig_size, new_size, est_save_str, progress_pct, eta_str),
             format!("SPEED: {} | ELAPSED: {}", speed_str, duration),
         ];
         
@@ -1154,37 +1205,49 @@ fn render_job_table(f: &mut Frame, app: &mut App, area: Rect) {
                     }
                 } else {
                     // Estimate savings if not yet transcoded
-                    if has_estimation_metadata(job) {
-                        if let Some(savings_gb) = estimate_space_savings_gb(job) {
+                    // Use cached estimate if available (calculated in background during refresh)
+                    let savings_str = if let Some(cached_estimate) = app.estimated_savings_cache.get(&job.id) {
+                        if let Some(savings_gb) = cached_estimate {
                             format!("~{:.1}GB", savings_gb)
                         } else {
-                            // Calculation failed despite having metadata - show why
+                            // Cached as None - metadata incomplete
                             let missing = vec![
-                                if job.original_bytes.is_none() { "orig_bytes" } else { "" },
+                                if job.original_bytes.is_none() { "orig" } else { "" },
                                 if job.video_codec.is_none() { "codec" } else { "" },
-                                if job.video_width.is_none() { "width" } else { "" },
-                                if job.video_height.is_none() { "height" } else { "" },
-                                if job.video_bitrate.is_none() { "bitrate" } else { "" },
+                                if job.video_width.is_none() { "w" } else { "" },
+                                if job.video_height.is_none() { "h" } else { "" },
+                                if job.video_bitrate.is_none() { "br" } else { "" },
                                 if job.video_frame_rate.is_none() { "fps" } else { "" },
                             ].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(",");
                             if missing.is_empty() {
                                 "calc?".to_string() // All metadata present but calc failed
                             } else {
-                                format!("no:{}", truncate_string(&missing, 8))
+                                format!("-{}", truncate_string(&missing, 10))
                             }
                         }
                     } else {
-                        // Show what's missing
-                        let missing = vec![
-                            if job.original_bytes.is_none() { "orig" } else { "" },
-                            if job.video_codec.is_none() { "codec" } else { "" },
-                            if job.video_width.is_none() { "w" } else { "" },
-                            if job.video_height.is_none() { "h" } else { "" },
-                            if job.video_bitrate.is_none() { "br" } else { "" },
-                            if job.video_frame_rate.is_none() { "fps" } else { "" },
-                        ].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(",");
-                        format!("-{}", truncate_string(&missing, 10))
-                    }
+                        // Not in cache yet - calculate on-the-fly (shouldn't happen often after first refresh)
+                        if has_estimation_metadata(job) {
+                            if let Some(savings_gb) = estimate_space_savings_gb(job) {
+                                format!("~{:.1}GB", savings_gb)
+                            } else {
+                                // Calculation failed despite having metadata
+                                "calc?".to_string()
+                            }
+                        } else {
+                            // Show what's missing
+                            let missing = vec![
+                                if job.original_bytes.is_none() { "orig" } else { "" },
+                                if job.video_codec.is_none() { "codec" } else { "" },
+                                if job.video_width.is_none() { "w" } else { "" },
+                                if job.video_height.is_none() { "h" } else { "" },
+                                if job.video_bitrate.is_none() { "br" } else { "" },
+                                if job.video_frame_rate.is_none() { "fps" } else { "" },
+                            ].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(",");
+                            format!("-{}", truncate_string(&missing, 10))
+                        }
+                    };
+                    savings_str
                 };
 
                 let duration = if let Some(started) = job.started_at {
