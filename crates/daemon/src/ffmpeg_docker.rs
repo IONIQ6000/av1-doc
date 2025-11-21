@@ -86,10 +86,14 @@ pub async fn run_av1_qsv_job(
     decision: &WebSourceDecision,
     encoding_params: &EncodingParams,
 ) -> Result<FFmpegResult> {
-    // Get parent directory and basenames for Docker volume mounting
-    let parent_dir = input
+    // Get parent directories and basenames for Docker volume mounting
+    let input_parent_dir = input
         .parent()
         .context("QSV encoding: Input file has no parent directory")?;
+    let output_parent_dir = temp_output
+        .parent()
+        .context("QSV encoding: Output file has no parent directory")?;
+    
     let input_basename = input
         .file_name()
         .and_then(|n| n.to_str())
@@ -99,14 +103,15 @@ pub async fn run_av1_qsv_job(
         .and_then(|n| n.to_str())
         .context("QSV encoding: Output file has no basename")?;
 
-    // Container paths
-    let container_input = format!("/config/{}", input_basename);
-    let container_output = format!("/config/{}", output_basename);
+    // Container paths - mount input and output directories separately
+    let container_input = format!("/input/{}", input_basename);
+    let container_output = format!("/output/{}", output_basename);
 
     // Build docker command base
     // Note: Using --privileged flag required when Docker runs inside LXC containers
     // Mount /dev/dri as a volume for QSV hardware access (better than --device for DRI)
     // Use --entrypoint to bypass entrypoint script and run ffmpeg directly
+    // Mount input and output directories separately to support different storage locations
     let mut cmd = Command::new(&cfg.docker_bin);
     cmd.arg("run")
         .arg("--rm")
@@ -120,7 +125,9 @@ pub async fn run_av1_qsv_job(
         .arg("-v")
         .arg("/dev/dri:/dev/dri")
         .arg("-v")
-        .arg(format!("{}:/config", parent_dir.display()))
+        .arg(format!("{}:/input:ro", input_parent_dir.display())) // Read-only input
+        .arg("-v")
+        .arg(format!("{}:/output", output_parent_dir.display())) // Writable output (temp dir)
         .arg(&cfg.docker_image);
 
     // Build ffmpeg arguments
@@ -229,8 +236,8 @@ pub async fn run_av1_qsv_job(
 
     // Log the full command for debugging (before moving ffmpeg_args)
     use log::debug;
-    debug!("🎬 QSV encoding: docker run --rm --privileged -e LIBVA_DRIVER_NAME=iHD -v /dev/dri:/dev/dri -v {}:/config {} ffmpeg [args...]",
-           parent_dir.display(), cfg.docker_image);
+    debug!("🎬 QSV encoding: docker run --rm --privileged -e LIBVA_DRIVER_NAME=iHD -v /dev/dri:/dev/dri -v {}:/input:ro -v {}:/output {} ffmpeg [args...]",
+           input_parent_dir.display(), output_parent_dir.display(), cfg.docker_image);
     debug!("🎬 QSV ffmpeg args: {:?}", ffmpeg_args);
     debug!("🎬 QSV initialization: qsv=hw:/dev/dri/renderD128, codec: av1_qsv, quality: {}", encoding_params.qp);
 
