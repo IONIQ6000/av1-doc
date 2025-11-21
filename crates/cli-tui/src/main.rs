@@ -857,6 +857,7 @@ struct App {
     // Configuration
     job_state_dir: PathBuf,
     command_dir: PathBuf,
+    temp_output_dir: PathBuf,
     
     // Timing and status
     last_refresh: DateTime<Utc>,
@@ -872,7 +873,16 @@ struct App {
 }
 
 impl App {
-    fn new(job_state_dir: PathBuf) -> Self {
+    /// Generate temp output path using configured temp_output_dir (same logic as daemon)
+    fn get_temp_output_path(&self, source_path: &Path) -> PathBuf {
+        let filename = source_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        self.temp_output_dir.join(format!("{}.tmp.av1.mkv", filename))
+    }
+    
+    fn new(job_state_dir: PathBuf, temp_output_dir: PathBuf) -> Self {
         // Derive command_dir from job_state_dir
         let command_dir = job_state_dir.parent()
             .map(|p| p.join("commands"))
@@ -887,6 +897,7 @@ impl App {
             estimated_savings_cache: HashMap::new(),
             job_state_dir,
             command_dir,
+            temp_output_dir,
             last_refresh: Utc::now(),
             last_job_count: 0,
             last_message: None,
@@ -1334,7 +1345,7 @@ impl App {
         }
         
         let now = Utc::now();
-        let temp_output = job.source_path.with_extension("tmp.av1.mkv");
+        let temp_output = self.get_temp_output_path(&job.source_path);
         let orig_backup = job.source_path.with_extension("orig.mkv");
         
         // Get original size
@@ -1477,7 +1488,7 @@ impl App {
             if let Some((source_path, original_bytes, started_at, video_codec, _status)) = job_data {
                 // Create a temporary job-like structure to pass progress detection info
                 // Since we can't mutate self while iterating, we'll update progress directly
-                let temp_output = source_path.with_extension("tmp.av1.mkv");
+                let temp_output = self.get_temp_output_path(&source_path);
                 let original_size = original_bytes.unwrap_or(0);
                 
                 // Check if temp file exists and update progress
@@ -1720,7 +1731,7 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let mut app = App::new(cfg.job_state_dir.clone());
+    let mut app = App::new(cfg.job_state_dir.clone(), cfg.temp_output_dir.clone());
 
     // Main event loop with adaptive refresh rate
     loop {
