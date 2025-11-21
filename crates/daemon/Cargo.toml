@@ -17,3 +17,6 @@ chrono.workspace = true
 toml = "0.8"
 log = "0.4"
 
+[dev-dependencies]
+proptest = "1.4"
+

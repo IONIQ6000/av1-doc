@@ -1176,7 +1176,7 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     
     // Step 7: Run transcoding
     info!("Job {}: Starting ffmpeg transcoding with QP: {}...", job.id, encoding_params.qp);
-    let ffmpeg_result = match ffmpeg_docker::run_av1_vaapi_job(
+    let ffmpeg_result = match ffmpeg_docker::run_av1_qsv_job(
         cfg,
         &job.source_path,
         &temp_output,
