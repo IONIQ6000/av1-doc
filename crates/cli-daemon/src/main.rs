@@ -5,12 +5,22 @@ use daemon::{
     job::{self, Job, JobStatus, load_all_jobs, save_job},
     scan, ffprobe, classifier, ffmpeg_docker, sidecar,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::fs;
 use std::collections::{HashMap, HashSet};
 use chrono::{Utc, DateTime};
 use log::{info, warn, error, debug};
 use tokio::process::Command;
+
+/// Generate temp output path using configured temp_output_dir
+fn get_temp_output_path(cfg: &TranscodeConfig, source_path: &Path) -> PathBuf {
+    // Always use configured temp directory with source filename
+    let filename = source_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown");
+    cfg.temp_output_dir.join(format!("{}.tmp.av1.mkv", filename))
+}
 
 /// AV1 transcoding daemon
 #[derive(Parser, Debug)]
@@ -73,8 +83,10 @@ async fn main() -> Result<()> {
     }
 
     // Main daemon loop
+    let mut scan_count = 0u64;
     loop {
-        info!("Starting library scan...");
+        scan_count += 1;
+        info!("Starting library scan #{}", scan_count);
 
         let scan_results = scan::scan_library(&cfg).await
             .context("Failed to scan library")?;
@@ -226,6 +238,23 @@ async fn main() -> Result<()> {
             }
         }
 
+        // Periodic cleanup of orphaned temp files (every 10 scans = ~10 minutes)
+        if scan_count % 10 == 0 {
+            info!("🧹 Running periodic temp file cleanup...");
+            match cleanup_orphaned_temp_files(&cfg).await {
+                Ok(count) => {
+                    if count > 0 {
+                        info!("✅ Periodic cleanup: removed {} orphaned temp file(s)", count);
+                    } else {
+                        debug!("Periodic cleanup: no orphaned files found");
+                    }
+                }
+                Err(e) => {
+                    warn!("⚠️  Periodic cleanup failed (non-fatal): {}", e);
+                }
+            }
+        }
+
         // Sleep before next scan
         info!("Sleeping for {} seconds before next scan", cfg.scan_interval_secs);
         tokio::time::sleep(tokio::time::Duration::from_secs(cfg.scan_interval_secs)).await;
@@ -243,10 +272,11 @@ struct JobProgressState {
 // Use a function that maintains state via thread-local or pass it as parameter
 // For simplicity, we'll pass state as a mutable reference through the call chain
 fn check_file_activity_with_state(
+    cfg: &TranscodeConfig,
     job: &Job,
     progress_state: &mut HashMap<String, JobProgressState>
 ) -> Result<(bool, u64, Option<u64>)> {
-    let temp_output = job.source_path.with_extension("tmp.av1.mkv");
+    let temp_output = get_temp_output_path(cfg, &job.source_path);
     
     if !temp_output.exists() {
         return Ok((false, 0, None));
@@ -419,7 +449,7 @@ async fn recover_stuck_jobs(cfg: &TranscodeConfig) -> Result<usize> {
         
         // Signal 3: File activity check (if enabled)
         if cfg.stuck_job_check_enable_file_activity && !is_stuck {
-            match check_file_activity_with_state(&job, &mut progress_state) {
+            match check_file_activity_with_state(cfg, &job, &mut progress_state) {
                 Ok((has_activity, _current_size, current_mtime)) => {
                     if let Some(state) = progress_state.get(&job.id) {
                         let time_since_last_activity = now - state.last_check_time;
@@ -476,7 +506,7 @@ fn recover_job_safely(
     reason: &str,
     progress_state: &mut HashMap<String, JobProgressState>
 ) -> Result<()> {
-    let temp_output = job.source_path.with_extension("tmp.av1.mkv");
+    let temp_output = get_temp_output_path(cfg, &job.source_path);
     let orig_backup = job.source_path.with_extension("orig.mkv");
     
     // Clean up temp file if it exists (abandoned transcode)
@@ -539,7 +569,7 @@ async fn force_requeue_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     
     info!("🔄 Force requeue requested for job {}: {}", job.id, job.source_path.display());
     
-    let temp_output = job.source_path.with_extension("tmp.av1.mkv");
+    let temp_output = get_temp_output_path(cfg, &job.source_path);
     let orig_backup = job.source_path.with_extension("orig.mkv");
     
     // Step 1: Try to stop Docker container if it exists
@@ -765,97 +795,82 @@ async fn process_command_files(cfg: &TranscodeConfig) -> Result<usize> {
 
 /// Clean up orphaned temp files that don't have active jobs
 /// Returns the number of files cleaned up
+/// Aggressively cleans both library roots AND temp_output_dir
 async fn cleanup_orphaned_temp_files(cfg: &TranscodeConfig) -> Result<usize> {
-    info!("🔍 Checking for orphaned temp files...");
+    info!("🔍 Checking for orphaned temp files in library and temp directory...");
     
     // Load all jobs to check against
     let jobs = load_all_jobs(&cfg.job_state_dir)
         .context("Failed to load jobs for cleanup")?;
     
-    // Create set of source paths that have active jobs
-    let active_paths: HashSet<_> = jobs
+    // Create set of filenames that have active jobs (just the stem, not full path)
+    let active_filenames: HashSet<String> = jobs
         .iter()
         .filter(|j| matches!(j.status, JobStatus::Pending | JobStatus::Running))
-        .map(|j| &j.source_path)
+        .filter_map(|j| {
+            j.source_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     
     let mut cleaned_count = 0;
     
-    // Scan library roots for temp files
-    for root in &cfg.library_roots {
-        if !root.exists() {
-            continue;
-        }
+    // PRIORITY 1: Clean temp_output_dir (NVMe) - this is where space matters most!
+    info!("🧹 Cleaning temp directory: {}", cfg.temp_output_dir.display());
+    if cfg.temp_output_dir.exists() {
+        let temp_dir = cfg.temp_output_dir.clone();
+        let active_names = active_filenames.clone();
         
-        // Use walkdir in blocking task to find temp files
-        let temp_files = tokio::task::spawn_blocking({
-            let root = root.clone();
-            move || {
-                let mut temp_files = Vec::new();
-                for entry in walkdir::WalkDir::new(&root)
-                    .follow_links(false)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                {
+        let temp_cleaned = tokio::task::spawn_blocking(move || {
+            let mut count = 0;
+            if let Ok(entries) = fs::read_dir(&temp_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
                     let path = entry.path();
-                    if path.is_file() {
-                        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                            if file_name.contains(".tmp.av1.") || file_name.ends_with(".tmp.av1.mkv") {
-                                temp_files.push(path.to_path_buf());
+                    if !path.is_file() {
+                        continue;
+                    }
+                    
+                    // Check if it's a temp file
+                    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                        if !file_name.ends_with(".tmp.av1.mkv") {
+                            continue;
+                        }
+                        
+                        // Extract base filename (remove .tmp.av1.mkv)
+                        let base_name = file_name.trim_end_matches(".tmp.av1.mkv");
+                        
+                        // Check if there's an active job for this file
+                        if !active_names.contains(base_name) {
+                            // No active job - delete it!
+                            if let Ok(metadata) = fs::metadata(&path) {
+                                let size_mb = metadata.len() as f64 / 1_000_000.0;
+                                info!("🗑️  Deleting orphaned temp file: {} ({:.1} MB)", file_name, size_mb);
+                            }
+                            
+                            if fs::remove_file(&path).is_ok() {
+                                count += 1;
                             }
                         }
                     }
                 }
-                temp_files
             }
-        }).await.context("Failed to scan for temp files")?;
+            count
+        }).await.context("Failed to clean temp directory")?;
         
-        for temp_file in temp_files {
-            // Try to find corresponding source path (remove .tmp.av1.mkv extension)
-            // Example: "movie.tmp.av1.mkv" -> "movie.mkv"
-            let source_path = if let Some(file_name) = temp_file.file_stem().and_then(|s| s.to_str()) {
-                // file_name would be "movie.tmp.av1" for "movie.tmp.av1.mkv"
-                if let Some(parent) = temp_file.parent() {
-                    if file_name.ends_with(".tmp.av1") {
-                        // Remove ".tmp.av1" suffix
-                        let base_name = &file_name[..file_name.len() - 8]; // ".tmp.av1" is 8 chars
-                        parent.join(format!("{}.mkv", base_name))
-                    } else {
-                        // Fallback: just replace .tmp.av1 in the full file name
-                        let mut source_path = temp_file.clone();
-                        if let Some(file_name_str) = temp_file.file_name().and_then(|n| n.to_str()) {
-                            let new_name = file_name_str.replace(".tmp.av1.", ".").replace(".tmp.av1", "");
-                            source_path.set_file_name(&new_name);
-                        }
-                        source_path
-                    }
-                } else {
-                    temp_file.clone()
-                }
-            } else {
-                temp_file.clone()
-            };
-            
-            // Check if this temp file has an active job
-            let has_active_job = active_paths.contains(&source_path) || 
-                                 jobs.iter().any(|j| {
-                                     // Also check if temp file matches any job's expected temp path
-                                     j.source_path.with_extension("tmp.av1.mkv") == temp_file
-                                 });
-            
-            if !has_active_job {
-                // Orphaned temp file - delete it
-                fs::remove_file(&temp_file)
-                    .with_context(|| format!("Failed to delete orphaned temp file: {}", temp_file.display()))?;
-                info!("🗑️  Deleted orphaned temp file: {}", temp_file.display());
-                cleaned_count += 1;
-            }
+        cleaned_count += temp_cleaned;
+        if temp_cleaned > 0 {
+            info!("✅ Cleaned {} orphaned file(s) from temp directory", temp_cleaned);
         }
+    } else {
+        warn!("⚠️  Temp directory does not exist: {}", cfg.temp_output_dir.display());
     }
     
-    if cleaned_count > 0 {
-        info!("✅ Cleaned up {} orphaned temp file(s)", cleaned_count);
-    } else {
+    // Note: We don't scan library roots anymore since temp files are now exclusively in temp_output_dir
+    // This is much faster and cleaner!
+    
+    if cleaned_count == 0 {
         debug!("No orphaned temp files found");
     }
     
@@ -1164,7 +1179,13 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     }
 
     // Step 5: Generate temp output path
-    let temp_output = job.source_path.with_extension("tmp.av1.mkv");
+    let temp_output = get_temp_output_path(cfg, &job.source_path);
+    info!("Job {}: Using fast temp directory: {}", job.id, cfg.temp_output_dir.display());
+    
+    // Ensure temp directory exists
+    fs::create_dir_all(&cfg.temp_output_dir)
+        .with_context(|| format!("Failed to create temp output directory: {}", cfg.temp_output_dir.display()))?;
+    
     info!("Job {}: Temp output will be: {}", job.id, temp_output.display());
 
     // Step 6: Determine encoding parameters
@@ -1247,8 +1268,33 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     info!("Job {}: ffmpeg completed successfully (exit code 0)", job.id);
 
     // Step 7: Verify temp output file exists and is valid
+    info!("Job {}: Verifying temp output file: {}", job.id, temp_output.display());
+    
+    // Check parent directory exists and is writable
+    if let Some(parent) = temp_output.parent() {
+        if !parent.exists() {
+            error!("Job {}: Parent directory does not exist: {}", job.id, parent.display());
+        } else {
+            info!("Job {}: Parent directory exists: {}", job.id, parent.display());
+            
+            // List files in parent directory to see what's there
+            if let Ok(entries) = fs::read_dir(parent) {
+                let files: Vec<String> = entries
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                    .filter(|name| name.contains("tmp.av1") || name.contains(&job.source_path.file_stem().and_then(|s| s.to_str()).unwrap_or("")))
+                    .collect();
+                info!("Job {}: Related files in directory: {:?}", job.id, files);
+            }
+        }
+    }
+    
     if !temp_output.exists() {
-        let reason = "transcoded output file does not exist".to_string();
+        let reason = format!("transcoded output file does not exist: {}", temp_output.display());
+        error!("Job {}: {}", job.id, reason);
+        error!("Job {}: FFmpeg reported success but output file is missing", job.id);
+        error!("Job {}: This may indicate: disk full, permission issue, or path mismatch", job.id);
+        
         sidecar::write_why_txt(&job.source_path, &reason)?;
         job.status = JobStatus::Failed;
         job.reason = Some(reason);
@@ -1256,6 +1302,8 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         save_job(job, &cfg.job_state_dir)?;
         return Ok(());
     }
+    
+    info!("Job {}: ✓ Temp output file exists", job.id);
 
     let new_metadata = fs::metadata(&temp_output)
         .with_context(|| format!("Failed to stat output file: {}", temp_output.display()))?;
@@ -1365,9 +1413,25 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
             job.source_path.display(), orig_backup.display()))?;
 
     // Replace with transcoded file
-    fs::rename(&temp_output, &job.source_path)
-        .with_context(|| format!("Failed to replace original with transcoded file: {} -> {}", 
-            temp_output.display(), job.source_path.display()))?;
+    // If temp file is on different filesystem (e.g., NVMe), rename will fail - use copy instead
+    if let Err(e) = fs::rename(&temp_output, &job.source_path) {
+        info!("Job {}: Rename failed ({}), copying from temp directory instead...", job.id, e);
+        
+        // Copy temp file to final location
+        fs::copy(&temp_output, &job.source_path)
+            .with_context(|| format!("Failed to copy transcoded file: {} -> {}", 
+                temp_output.display(), job.source_path.display()))?;
+        
+        info!("Job {}: ✓ Copied transcoded file from temp directory", job.id);
+        
+        // Delete temp file after successful copy
+        fs::remove_file(&temp_output)
+            .with_context(|| format!("Failed to delete temp file after copy: {}", temp_output.display()))?;
+        
+        info!("Job {}: 🗑️  Deleted temp file from fast storage", job.id);
+    } else {
+        info!("Job {}: ✓ Moved transcoded file (same filesystem)", job.id);
+    }
 
     // Verify replacement succeeded
     if !job.source_path.exists() {

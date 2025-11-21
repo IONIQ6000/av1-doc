@@ -21,6 +21,9 @@ pub struct TranscodeConfig {
     pub docker_bin: PathBuf,
     /// GPU device path to pass to Docker (typically /dev/dri)
     pub gpu_device: PathBuf,
+    /// Directory for temporary output files (e.g., fast NVMe drive)
+    /// This should be on fast storage (NVMe) separate from your media library
+    pub temp_output_dir: PathBuf,
     /// Time-based timeout in seconds for stuck job detection (default: 3600 = 1 hour)
     #[serde(default = "default_stuck_job_timeout_secs")]
     pub stuck_job_timeout_secs: u64,
@@ -73,6 +76,7 @@ impl TranscodeConfig {
             stuck_job_check_enable_process: true,
             stuck_job_check_enable_file_activity: true,
             command_dir: None, // Will be derived from job_state_dir
+            temp_output_dir: PathBuf::from("/tmp/av1d-temp"), // Fast temp storage
         }
     }
     
