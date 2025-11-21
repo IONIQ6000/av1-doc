@@ -119,16 +119,19 @@ And in Docker logs:
 
 ## Important Notes
 
-### Config File Issue
+### Config File - Tilde Support Added
 
 Your config had:
 ```json
 "temp_output_dir":"~/temp"
 ```
 
-The `~` (tilde) doesn't expand in JSON files. You MUST use an absolute path:
+**Good news**: I added tilde expansion support! Now `~/temp` will work correctly and expand to your home directory.
+
+You can use either:
 ```json
-"temp_output_dir":"/root/temp"
+"temp_output_dir":"~/temp"          // Now works! Expands to /root/temp
+"temp_output_dir":"/root/temp"      // Absolute path also works
 ```
 
 ### No More Fallback

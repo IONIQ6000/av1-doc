@@ -2,6 +2,26 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Expand tilde (~) in a path to the user's home directory
+fn expand_tilde(path: &Path) -> PathBuf {
+    if let Some(path_str) = path.to_str() {
+        if path_str.starts_with("~/") {
+            // Get home directory
+            if let Some(home) = std::env::var_os("HOME") {
+                let home_path = PathBuf::from(home);
+                return home_path.join(&path_str[2..]); // Skip "~/"
+            }
+        } else if path_str == "~" {
+            // Just "~" by itself
+            if let Some(home) = std::env::var_os("HOME") {
+                return PathBuf::from(home);
+            }
+        }
+    }
+    // If no tilde or expansion failed, return original path
+    path.to_path_buf()
+}
+
 /// Configuration for the AV1 transcoding daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscodeConfig {
@@ -112,7 +132,22 @@ impl TranscodeConfig {
             }
         }
 
+        // Expand tilde (~) in paths after loading
+        config.expand_tilde_in_paths();
+
         Ok(config)
+    }
+
+    /// Expand tilde (~) in all PathBuf fields to the user's home directory
+    fn expand_tilde_in_paths(&mut self) {
+        self.library_roots = self.library_roots.iter().map(|p| expand_tilde(p)).collect();
+        self.job_state_dir = expand_tilde(&self.job_state_dir);
+        self.docker_bin = expand_tilde(&self.docker_bin);
+        self.gpu_device = expand_tilde(&self.gpu_device);
+        self.temp_output_dir = expand_tilde(&self.temp_output_dir);
+        if let Some(ref cmd_dir) = self.command_dir {
+            self.command_dir = Some(expand_tilde(cmd_dir));
+        }
     }
 }
 
