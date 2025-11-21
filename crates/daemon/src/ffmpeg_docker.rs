@@ -505,6 +505,185 @@ fn parse_frame_rate(frame_rate_str: &str) -> Option<f64> {
         .filter(|&f| f > 0.0 && f < 200.0) // Sanity check
 }
 
+/// Validation result for output file
+#[derive(Debug)]
+pub struct ValidationResult {
+    pub is_valid: bool,
+    pub issues: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Validate the output file to detect potential corruption
+/// Checks for common issues that indicate encoding problems
+pub async fn validate_output(
+    cfg: &TranscodeConfig,
+    output_path: &Path,
+    expected_bit_depth: BitDepth,
+) -> Result<ValidationResult> {
+    use log::{info, warn};
+    
+    let mut issues = Vec::new();
+    let mut warnings = Vec::new();
+    
+    info!("🔍 Validating output file: {}", output_path.display());
+    
+    // Step 1: Verify file exists and is not empty
+    if !output_path.exists() {
+        issues.push("Output file does not exist".to_string());
+        return Ok(ValidationResult {
+            is_valid: false,
+            issues,
+            warnings,
+        });
+    }
+    
+    let metadata = std::fs::metadata(output_path)
+        .with_context(|| format!("Failed to stat output file: {}", output_path.display()))?;
+    
+    if metadata.len() == 0 {
+        issues.push("Output file is empty (0 bytes)".to_string());
+        return Ok(ValidationResult {
+            is_valid: false,
+            issues,
+            warnings,
+        });
+    }
+    
+    if metadata.len() < 1_000_000 {
+        warnings.push(format!("Output file is very small ({} bytes)", metadata.len()));
+    }
+    
+    // Step 2: Run ffprobe on output to verify it's valid
+    let probe_result = crate::ffprobe::probe_file(cfg, output_path).await;
+    
+    let output_meta = match probe_result {
+        Ok(meta) => meta,
+        Err(e) => {
+            issues.push(format!("Failed to probe output file (likely corrupted): {}", e));
+            return Ok(ValidationResult {
+                is_valid: false,
+                issues,
+                warnings,
+            });
+        }
+    };
+    
+    // Step 3: Verify video stream exists
+    let video_streams: Vec<_> = output_meta.streams.iter()
+        .filter(|s| s.codec_type.as_deref() == Some("video"))
+        .collect();
+    
+    if video_streams.is_empty() {
+        issues.push("No video stream found in output".to_string());
+        return Ok(ValidationResult {
+            is_valid: false,
+            issues,
+            warnings,
+        });
+    }
+    
+    let video_stream = video_streams[0];
+    
+    // Step 4: Verify codec is AV1
+    if let Some(ref codec) = video_stream.codec_name {
+        if codec != "av1" {
+            issues.push(format!("Output codec is '{}', expected 'av1'", codec));
+        }
+    } else {
+        issues.push("Output video stream has no codec name".to_string());
+    }
+    
+    // Step 5: Verify bit depth matches expected
+    let output_bit_depth = video_stream.detect_bit_depth();
+    if output_bit_depth != expected_bit_depth {
+        warnings.push(format!(
+            "Output bit depth ({:?}) differs from expected ({:?})",
+            output_bit_depth, expected_bit_depth
+        ));
+    }
+    
+    // Step 6: Verify pixel format is correct for bit depth
+    if let Some(ref pix_fmt) = video_stream.pix_fmt {
+        let expected_pix_fmt = match expected_bit_depth {
+            BitDepth::Bit8 => "yuv420p",
+            BitDepth::Bit10 => "yuv420p10le",
+            BitDepth::Unknown => "yuv420p",
+        };
+        
+        if !pix_fmt.contains(expected_pix_fmt) {
+            warnings.push(format!(
+                "Output pixel format '{}' may not match expected '{}' for {:?}",
+                pix_fmt, expected_pix_fmt, expected_bit_depth
+            ));
+        }
+    }
+    
+    // Step 7: Verify dimensions are valid (even numbers)
+    if let (Some(w), Some(h)) = (video_stream.width, video_stream.height) {
+        if w <= 0 || h <= 0 {
+            issues.push(format!("Invalid dimensions: {}x{}", w, h));
+        }
+        if w % 2 != 0 || h % 2 != 0 {
+            warnings.push(format!("Odd dimensions detected: {}x{} (may cause playback issues)", w, h));
+        }
+    } else {
+        warnings.push("Could not determine output dimensions".to_string());
+    }
+    
+    // Step 8: Check for frame rate issues (VFR corruption indicator)
+    if let (Some(ref avg_fr), Some(ref r_fr)) = (&video_stream.avg_frame_rate, &video_stream.r_frame_rate) {
+        // Parse frame rates
+        if let (Some(avg), Some(r)) = (parse_frame_rate(avg_fr), parse_frame_rate(r_fr)) {
+            let diff = (avg - r).abs();
+            if diff > 0.1 {
+                warnings.push(format!(
+                    "Variable frame rate detected in output (avg: {:.2}, r: {:.2}) - may indicate timestamp issues",
+                    avg, r
+                ));
+            }
+        }
+    }
+    
+    // Step 9: Verify audio streams were preserved
+    let audio_count = output_meta.streams.iter()
+        .filter(|s| s.codec_type.as_deref() == Some("audio"))
+        .count();
+    
+    if audio_count == 0 {
+        warnings.push("No audio streams in output (may be intentional)".to_string());
+    }
+    
+    // Step 10: Check format-level issues
+    if let Some(ref format_bitrate) = output_meta.format.bit_rate {
+        if let Ok(bitrate) = format_bitrate.parse::<u64>() {
+            if bitrate < 100_000 {
+                warnings.push(format!("Very low output bitrate: {} bps", bitrate));
+            }
+        }
+    }
+    
+    // Determine overall validity
+    let is_valid = issues.is_empty();
+    
+    if is_valid {
+        info!("✅ Output validation passed: {} warnings", warnings.len());
+        for warning in &warnings {
+            warn!("⚠️  Validation warning: {}", warning);
+        }
+    } else {
+        warn!("❌ Output validation failed: {} issues, {} warnings", issues.len(), warnings.len());
+        for issue in &issues {
+            warn!("❌ Validation issue: {}", issue);
+        }
+    }
+    
+    Ok(ValidationResult {
+        is_valid,
+        issues,
+        warnings,
+    })
+}
+
 /// Calculate expected file size reduction percentage based on QP, source codec, and bit depth
 fn calculate_expected_reduction(qp: i32, source_codec: &str, bit_depth: BitDepth) -> f64 {
     // Base reduction by QP value

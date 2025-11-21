@@ -6,14 +6,14 @@ use crate::config::TranscodeConfig;
 use tokio::process::Command;
 
 /// Complete ffprobe output structure
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct FFProbeData {
     pub streams: Vec<FFProbeStream>,
     pub format: FFProbeFormat,
 }
 
 /// Format-level metadata from ffprobe
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct FFProbeFormat {
     #[serde(rename = "format_name")]
     pub format_name: String,
@@ -27,7 +27,7 @@ pub struct FFProbeFormat {
 }
 
 /// Stream-level metadata from ffprobe
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct FFProbeStream {
     pub index: i32,
     #[serde(rename = "codec_type")]

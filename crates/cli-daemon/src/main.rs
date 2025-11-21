@@ -1143,7 +1143,25 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     // Step 4: Classify source
     let decision = classifier::classify_web_source(&job.source_path, &meta.format, &meta.streams);
     job.is_web_like = decision.is_web_like();
-    info!("Job {}: Source classification: {:?} (web_like: {})", job.id, decision.class, job.is_web_like);
+    info!("Job {}: 🎯 Source classification: {:?} (score: {:.2}, web_like: {})", 
+          job.id, decision.class, decision.score, job.is_web_like);
+    info!("Job {}: 📋 Classification reasons:", job.id);
+    for reason in &decision.reasons {
+        info!("Job {}:    - {}", job.id, reason);
+    }
+    
+    // Log encoding strategy based on classification
+    match decision.class {
+        daemon::classifier::SourceClass::WebLike => {
+            info!("Job {}: 🌐 Using WEB encoding strategy (VFR handling, timestamp fixes)", job.id);
+        }
+        daemon::classifier::SourceClass::DiscLike => {
+            info!("Job {}: 💿 Using DISC encoding strategy (standard CFR processing)", job.id);
+        }
+        daemon::classifier::SourceClass::Unknown => {
+            warn!("Job {}: ❓ Unknown source type - using conservative encoding strategy", job.id);
+        }
+    }
 
     // Step 5: Generate temp output path
     let temp_output = job.source_path.with_extension("tmp.av1.mkv");
@@ -1255,6 +1273,46 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         return Ok(());
     }
 
+    // Step 7.5: Validate output file for corruption
+    info!("Job {}: Running output validation to detect corruption...", job.id);
+    let expected_bit_depth = match encoding_params.bit_depth {
+        daemon::BitDepth::Bit8 => daemon::BitDepth::Bit8,
+        daemon::BitDepth::Bit10 => daemon::BitDepth::Bit10,
+        daemon::BitDepth::Unknown => daemon::BitDepth::Bit8,
+    };
+    
+    let validation_result = match ffmpeg_docker::validate_output(cfg, &temp_output, expected_bit_depth).await {
+        Ok(validation) => {
+            if !validation.is_valid {
+                let reason = format!("output validation failed: {}", validation.issues.join(", "));
+                error!("Job {}: ❌ {}", job.id, reason);
+                sidecar::write_why_txt(&job.source_path, &reason)?;
+                fs::remove_file(&temp_output).ok(); // Clean up corrupted file
+                job.status = JobStatus::Failed;
+                job.reason = Some(reason);
+                job.finished_at = Some(Utc::now());
+                save_job(job, &cfg.job_state_dir)?;
+                return Ok(());
+            }
+            
+            if !validation.warnings.is_empty() {
+                warn!("Job {}: ⚠️  Output validation warnings: {}", job.id, validation.warnings.len());
+                for warning in &validation.warnings {
+                    warn!("Job {}:    - {}", job.id, warning);
+                }
+            } else {
+                info!("Job {}: ✅ Output validation passed with no warnings", job.id);
+            }
+            
+            Some(validation)
+        }
+        Err(e) => {
+            warn!("Job {}: ⚠️  Output validation failed to run (non-fatal): {}", job.id, e);
+            // Don't fail the job if validation itself fails - just log it
+            None
+        }
+    };
+
     // Step 8: Size gate check
     let orig_bytes = job.original_bytes.unwrap_or(0);
     if orig_bytes == 0 {
@@ -1346,14 +1404,39 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         job.av1_quality = Some(ffmpeg_result.quality_used);
     }
     
+    let end_time = Utc::now();
     job.status = JobStatus::Success;
     job.output_path = Some(job.source_path.clone());
     job.new_bytes = Some(new_bytes);
-    job.finished_at = Some(Utc::now());
+    job.finished_at = Some(end_time);
     save_job(job, &cfg.job_state_dir)?;
 
     info!("Job {}: ✅ SUCCESS - Original file deleted, transcoded file in place (quality: {})", 
           job.id, job.av1_quality.unwrap_or(0));
+    
+    // Step 12: Generate comprehensive conversion report
+    info!("Job {}: 📝 Generating detailed conversion report...", job.id);
+    let report = sidecar::ConversionReport {
+        job: job.clone(),
+        source_meta: meta.clone(),
+        classification: decision.clone(),
+        encoding_params: encoding_params.clone(),
+        validation: validation_result,
+        ffmpeg_stderr: Some(ffmpeg_result.stderr.clone()),
+        start_time: job.started_at.unwrap_or(end_time),
+        end_time,
+    };
+    
+    match sidecar::write_conversion_report(&job.source_path, &report) {
+        Ok(()) => {
+            let report_path = sidecar::conversion_report_path(&job.source_path);
+            info!("Job {}: ✅ Conversion report written: {}", job.id, report_path.display());
+        }
+        Err(e) => {
+            warn!("Job {}: ⚠️  Failed to write conversion report (non-fatal): {}", job.id, e);
+        }
+    }
+    
     Ok(())
 }
 

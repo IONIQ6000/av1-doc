@@ -1,0 +1,178 @@
+═══════════════════════════════════════════════════════════════════════════
+                    AV1 CONVERSION REPORT (QSV)
+═══════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ JOB INFORMATION                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Job ID:           a1b2c3d4-e5f6-7890-abcd-ef1234567890
+Status:           Success
+Source File:      /media/movies/Inception.2010.1080p.BluRay.REMUX.mkv
+Output File:      /media/movies/Inception.2010.1080p.BluRay.REMUX.mkv
+Started:          2024-01-15 14:30:22 UTC
+Completed:        2024-01-15 16:45:18 UTC
+Duration:         2h 14m 56s
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ SOURCE ANALYSIS                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Video Stream:
+  Codec:          hevc
+  Resolution:     1920x1080
+  Pixel Format:   yuv420p10le
+  Bit Depth:      Bit10 (10)
+  HDR:            Yes
+  Color Transfer: smpte2084
+  Color Primaries: bt2020
+  Color Space:    bt2020nc
+  Frame Rate:     24000/1001 fps
+  Bitrate:        35.50 Mbps
+
+Audio Streams:    3 track(s)
+  Track 1:        truehd (eng)
+  Track 2:        ac3 (eng)
+  Track 3:        aac (spa)
+
+Subtitle Streams: 5 track(s)
+  Track 1:        subrip (eng)
+  Track 2:        subrip (spa)
+  Track 3:        subrip (fre)
+  Track 4:        subrip (ger)
+  Track 5:        pgs (eng)
+
+Container:        matroska,webm
+Muxing App:       MakeMKV v1.17.3
+Writing Library:  libebml v1.4.2 + libmatroska v1.6.4
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ SOURCE CLASSIFICATION                                                   │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Classification:   DiscLike
+Confidence Score: -0.65
+
+Detection Signals:
+  • filename contains BLURAY
+  • filename contains REMUX
+  • disc muxing_app: MakeMKV v1.17.3
+  • disc audio codec: truehd
+  • many streams: 3 audio, 5 subs (disc pattern)
+  • high bitrate/pixel: 0.3456 (disc pattern)
+
+Encoding Strategy:
+  → DISC encoding strategy applied
+  → Standard constant frame rate (CFR) processing
+  → No special timestamp handling needed
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ ENCODING PARAMETERS                                                     │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Hardware Encoder: Intel QSV (Quick Sync Video)
+Codec:            av1_qsv
+Device:           /dev/dri/renderD128
+Driver:           iHD (Intel Media Driver)
+
+Target Bit Depth: Bit10
+Pixel Format:     p010le
+AV1 Profile:      0 (main)
+Quality (QP):     26 (lower = higher quality)
+HDR Encoding:     Yes
+
+Filter Chain:
+  1. pad=ceil(iw/2)*2:ceil(ih/2)*2  (ensure even dimensions)
+  2. setsar=1                        (set sample aspect ratio)
+  3. format=p010le                   (pixel format conversion)
+  4. hwupload                        (upload to GPU memory)
+
+Stream Handling:
+  • Video:     Transcoded to AV1 (QSV hardware acceleration)
+  • Audio:     Copied (no re-encoding)
+  • Subtitles: Copied (no re-encoding)
+  • Chapters:  Preserved
+  • Metadata:  Preserved
+  • Russian tracks: Removed (audio & subtitles)
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ FILE SIZE COMPARISON                                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Original Size:    42.35 GB
+New Size:         18.72 GB
+Space Saved:      23.63 GB (55.8% reduction)
+Compression:      2.26x smaller
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ OUTPUT VALIDATION                                                       │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Validation Status: ✓ PASSED
+
+All validation checks passed:
+  ✓ File exists and is not empty
+  ✓ FFprobe can read file (not corrupted)
+  ✓ Video stream exists and is valid
+  ✓ Codec is AV1 as expected
+  ✓ Bit depth matches target
+  ✓ Pixel format is correct
+  ✓ Dimensions are valid
+  ✓ Frame rate is consistent (no VFR corruption)
+  ✓ Audio streams preserved
+  ✓ Bitrate is within expected range
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ FFMPEG ENCODING LOG (Last 50 lines)                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+
+frame=150234 fps=87 q=26.0 size=18432000kB time=01:44:32.45 bitrate=24.1Mbits/s speed=3.62x
+frame=150456 fps=87 q=26.0 size=18445312kB time=01:44:41.67 bitrate=24.1Mbits/s speed=3.62x
+frame=150678 fps=87 q=26.0 size=18458624kB time=01:44:50.89 bitrate=24.1Mbits/s speed=3.62x
+frame=150900 fps=87 q=26.0 size=18471936kB time=01:45:00.11 bitrate=24.1Mbits/s speed=3.62x
+frame=151122 fps=87 q=26.0 size=18485248kB time=01:45:09.33 bitrate=24.1Mbits/s speed=3.62x
+frame=151344 fps=87 q=26.0 size=18498560kB time=01:45:18.55 bitrate=24.1Mbits/s speed=3.62x
+frame=151566 fps=87 q=26.0 size=18511872kB time=01:45:27.77 bitrate=24.1Mbits/s speed=3.62x
+frame=151788 fps=87 q=26.0 size=18525184kB time=01:45:36.99 bitrate=24.1Mbits/s speed=3.62x
+frame=152010 fps=87 q=26.0 size=18538496kB time=01:45:46.21 bitrate=24.1Mbits/s speed=3.62x
+frame=152232 fps=87 q=26.0 size=18551808kB time=01:45:55.43 bitrate=24.1Mbits/s speed=3.62x
+frame=152454 fps=87 q=26.0 size=18565120kB time=01:46:04.65 bitrate=24.1Mbits/s speed=3.62x
+frame=152676 fps=87 q=26.0 size=18578432kB time=01:46:13.87 bitrate=24.1Mbits/s speed=3.62x
+frame=152898 fps=87 q=26.0 size=18591744kB time=01:46:23.09 bitrate=24.1Mbits/s speed=3.62x
+frame=153120 fps=87 q=26.0 size=18605056kB time=01:46:32.31 bitrate=24.1Mbits/s speed=3.62x
+frame=153342 fps=87 q=26.0 size=18618368kB time=01:46:41.53 bitrate=24.1Mbits/s speed=3.62x
+frame=153564 fps=87 q=26.0 size=18631680kB time=01:46:50.75 bitrate=24.1Mbits/s speed=3.62x
+frame=153786 fps=87 q=26.0 size=18644992kB time=01:46:59.97 bitrate=24.1Mbits/s speed=3.62x
+frame=154008 fps=87 q=26.0 size=18658304kB time=01:47:09.19 bitrate=24.1Mbits/s speed=3.62x
+frame=154230 fps=87 q=26.0 size=18671616kB time=01:47:18.41 bitrate=24.1Mbits/s speed=3.62x
+frame=154452 fps=87 q=26.0 size=18684928kB time=01:47:27.63 bitrate=24.1Mbits/s speed=3.62x
+frame=154674 fps=87 q=26.0 size=18698240kB time=01:47:36.85 bitrate=24.1Mbits/s speed=3.62x
+frame=154896 fps=87 q=26.0 size=18711552kB time=01:47:46.07 bitrate=24.1Mbits/s speed=3.62x
+frame=155118 fps=87 q=26.0 size=18724864kB time=01:47:55.29 bitrate=24.1Mbits/s speed=3.62x
+[libx264 @ 0x7f8b4c000000] frame I:1234  Avg QP:26.00  size:245678
+[libx264 @ 0x7f8b4c000000] frame P:45678 Avg QP:26.50  size:123456
+[libx264 @ 0x7f8b4c000000] frame B:108206 Avg QP:27.00  size:98765
+[libx264 @ 0x7f8b4c000000] consecutive B-frames: 2.3% 4.5% 12.7% 80.5%
+[libx264 @ 0x7f8b4c000000] mb I  I16..4: 12.3% 45.6% 42.1%
+[libx264 @ 0x7f8b4c000000] mb P  I16..4:  2.1%  8.9%  3.2%  P16..4: 34.5% 18.7% 12.3%  0.0%  0.0%    skip:20.3%
+[libx264 @ 0x7f8b4c000000] mb B  I16..4:  0.3%  1.2%  0.5%  B16..8: 28.9% 12.3%  4.5%  direct: 8.9%  skip:43.4%  L0:45.6% L1:38.9% BI:15.5%
+[libx264 @ 0x7f8b4c000000] 8x8 transform intra:45.6% inter:67.8%
+[libx264 @ 0x7f8b4c000000] coded y,uvDC,uvAC intra: 67.8% 78.9% 45.6% inter: 23.4% 34.5% 12.3%
+[libx264 @ 0x7f8b4c000000] i16 v,h,dc,p: 23% 34% 12% 31%
+[libx264 @ 0x7f8b4c000000] i8 v,h,dc,ddl,ddr,vr,hd,vl,hu: 12% 23% 34% 5% 6% 7% 8% 3% 2%
+[libx264 @ 0x7f8b4c000000] i4 v,h,dc,ddl,ddr,vr,hd,vl,hu: 15% 18% 20% 8% 9% 10% 7% 6% 7%
+[libx264 @ 0x7f8b4c000000] i8c dc,h,v,p: 45% 23% 18% 14%
+[libx264 @ 0x7f8b4c000000] Weighted P-Frames: Y:12.3% UV:8.9%
+[libx264 @ 0x7f8b4c000000] ref P L0: 56.7% 12.3% 18.9%  8.9%  3.2%
+[libx264 @ 0x7f8b4c000000] ref B L0: 78.9% 15.6%  5.5%
+[libx264 @ 0x7f8b4c000000] ref B L1: 89.7% 10.3%
+[libx264 @ 0x7f8b4c000000] kb/s:24123.45
+[aac @ 0x7f8b4d000000] Qavg: 123.456
+
+═══════════════════════════════════════════════════════════════════════════
+                         END OF REPORT
+═══════════════════════════════════════════════════════════════════════════
+
+Report generated: 2024-01-15 16:45:20 UTC
+Converter: AV1 Daemon (QSV)
+For issues or questions, check the logs or documentation.

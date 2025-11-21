@@ -124,12 +124,12 @@
   - Verify encoding speed and GPU utilization
   - _Requirements: 2.3, 2.5, 7.1, 7.2, 7.3, 7.4_
 
-- [ ] 13. Update documentation
+- [x] 13. Update documentation
   - Update README or documentation to mention QSV requirement
   - Document Docker image requirement
   - Document Intel Arc GPU compatibility
   - Add troubleshooting section for QSV issues
   - _Requirements: 6.1, 6.2_
 
-- [ ] 14. Final checkpoint - Ensure all tests pass
+- [x] 14. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
