@@ -70,6 +70,7 @@ analyze_video() {
             -of default=noprint_wrappers=1 "$file"
     else
         docker run --rm -v "$(pwd):/data" \
+            --entrypoint ffprobe \
             lscr.io/linuxserver/ffmpeg:version-8.0-cli \
             -v error -select_streams v:0 \
             -show_entries stream=codec_name,pix_fmt,width,height,bit_depth \
@@ -141,6 +142,7 @@ test_encode() {
                 -of default=noprint_wrappers=1:nokey=1 "$output")
         else
             actual_pix_fmt=$(docker run --rm -v "$(pwd):/data" \
+                --entrypoint ffprobe \
                 lscr.io/linuxserver/ffmpeg:version-8.0-cli \
                 -v error -select_streams v:0 \
                 -show_entries stream=pix_fmt \

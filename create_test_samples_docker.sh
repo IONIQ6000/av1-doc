@@ -22,6 +22,7 @@ if [ -f "sample_8bit_h264.mp4" ]; then
     # Verify with ffprobe
     echo "  Verifying..."
     docker run --rm -v "$(pwd):/data" \
+      --entrypoint ffprobe \
       lscr.io/linuxserver/ffmpeg:version-8.0-cli \
       -v error -select_streams v:0 \
       -show_entries stream=codec_name,pix_fmt,bit_depth \
@@ -46,6 +47,7 @@ if [ -f "sample_10bit_hevc.mkv" ]; then
     # Verify with ffprobe
     echo "  Verifying..."
     docker run --rm -v "$(pwd):/data" \
+      --entrypoint ffprobe \
       lscr.io/linuxserver/ffmpeg:version-8.0-cli \
       -v error -select_streams v:0 \
       -show_entries stream=codec_name,pix_fmt,bit_depth \
