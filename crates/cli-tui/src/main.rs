@@ -2194,17 +2194,20 @@ fn render_current_job(f: &mut Frame, app: &App, area: Rect) {
         };
         
         // Current compression ratio display (Task 8.5)
+        // Show estimated final compression ratio, not current progress
         let current_comp_ratio_str = if let Some(prog) = progress {
-            if let Some(ratio) = prog.current_compression_ratio {
-                format!("{:.1}%", ratio * 100.0)
-            } else {
-                // Calculate from current temp file size vs original
-                if prog.temp_file_size > 0 && prog.original_size > 0 {
-                    let ratio = (prog.original_size - prog.temp_file_size) as f64 / prog.original_size as f64;
-                    format!("{:.1}%", ratio * 100.0)
+            // Use estimated final size for ratio calculation
+            if let Some(est_final) = prog.estimated_final_size {
+                if prog.original_size > 0 {
+                    let reduction = (prog.original_size - est_final) as f64 / prog.original_size as f64;
+                    format!("{:.1}%", reduction * 100.0)
                 } else {
                     "-".to_string()
                 }
+            } else if let Some(ratio) = prog.current_compression_ratio {
+                format!("{:.1}%", ratio * 100.0)
+            } else {
+                "-".to_string()
             }
         } else {
             "-".to_string()
