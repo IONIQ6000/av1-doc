@@ -11,7 +11,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::stdout;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::collections::HashMap;
 use sysinfo::System;
