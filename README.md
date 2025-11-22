@@ -1,12 +1,35 @@
 # AV1 Daemon (Rust)
 
-A Rust-based AV1 transcoding daemon with ratatui TUI, using Docker ffmpeg with Intel QSV (Quick Sync Video) AV1 hardware acceleration.
+A Rust-based AV1 transcoding daemon with ratatui TUI, supporting both software-based CPU encoding and Intel QSV hardware acceleration.
 
 ## Overview
 
 This project provides:
-- **`av1d`**: A daemon that watches media libraries and transcodes files to AV1 using Intel QSV hardware acceleration
+- **`av1d`**: A daemon that watches media libraries and transcodes files to AV1
 - **`av1top`**: A ratatui-based terminal UI for monitoring transcoding jobs
+
+## Encoding Modes
+
+### Software AV1 Encoding (Recommended for Quality)
+
+Uses native FFmpeg 8.0+ with CPU-based AV1 encoders (SVT-AV1, libaom-av1, librav1e):
+- **Quality-first approach**: Optimized for maximum perceptual quality
+- **No Docker required**: Direct FFmpeg execution
+- **Intelligent classification**: REMUX, WEB-DL, LOW-QUALITY tiers
+- **Test clip workflow**: Validate quality before full encode
+- **Slower encoding**: 10-20x slower than hardware, but superior quality
+
+**Installation**: See [Software AV1 Installation Guide](INSTALL_SOFTWARE_AV1.md)
+
+### Hardware AV1 Encoding (Legacy)
+
+Uses Docker-based FFmpeg with Intel QSV hardware acceleration:
+- **Fast encoding**: Hardware-accelerated on Intel Arc GPUs
+- **Docker required**: Uses linuxserver FFmpeg image
+- **Good quality**: Hardware encoding with QSV
+- **Deprecated**: Maintained for existing installations only
+
+**Installation**: See [Docker-based Installation Guide](INSTALL.md)
 
 ## Architecture
 
@@ -16,8 +39,25 @@ The project is organized as a Cargo workspace with three crates:
 - **`crates/cli-daemon`**: Binary crate for the `av1d` daemon
 - **`crates/cli-tui`**: Binary crate for the `av1top` monitoring TUI
 
-## Requirements
+## Documentation
 
+### Installation Guides
+
+- **[Quick Start: Software AV1](QUICK_START_SOFTWARE_AV1.md)** - 5-minute setup for software encoding
+- **[Software AV1 Installation Guide](INSTALL_SOFTWARE_AV1.md)** - Complete installation instructions
+- **[FFmpeg Configuration Guide](FFMPEG_CONFIGURATION.md)** - Configure FFmpeg binary paths
+- **[Migration Guide](MIGRATION_DOCKER_TO_SOFTWARE.md)** - Migrate from Docker to software encoding
+- **[Docker/Hardware Installation](INSTALL.md)** - Legacy Docker-based installation (deprecated)
+
+### Requirements
+
+**Software Encoding** (Recommended):
+- Rust toolchain (2021 edition)
+- FFmpeg 8.0+ with AV1 encoder support (libsvtav1, libaom-av1, or librav1e)
+- 8+ CPU cores (16+ recommended)
+- 16GB+ RAM for 4K content
+
+**Hardware Encoding** (Legacy):
 - Rust toolchain (2021 edition)
 - Docker installed and running
 - **Intel Arc GPU** (A310, A380, or newer) with QSV support

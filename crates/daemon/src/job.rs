@@ -62,6 +62,24 @@ pub struct Job {
     pub av1_profile: Option<u8>,
     /// Whether source content is HDR
     pub is_hdr: Option<bool>,
+    /// Quality tier classification (Remux, WebDl, LowQuality)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_tier: Option<String>,
+    /// CRF value used for encoding (lower = higher quality)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crf_used: Option<u8>,
+    /// Preset value used for encoding (lower = slower/higher quality)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_used: Option<u8>,
+    /// Encoder used (e.g., "libsvtav1", "libaom-av1", "librav1e")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoder_used: Option<String>,
+    /// Path to test clip file (for REMUX sources)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_clip_path: Option<PathBuf>,
+    /// Whether test clip was approved by user
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_clip_approved: Option<bool>,
 }
 
 impl Job {
@@ -90,6 +108,12 @@ impl Job {
             target_bit_depth: None,
             av1_profile: None,
             is_hdr: None,
+            quality_tier: None,
+            crf_used: None,
+            preset_used: None,
+            encoder_used: None,
+            test_clip_path: None,
+            test_clip_approved: None,
         }
     }
 }

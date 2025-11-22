@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f32b3f7913378b4b8c93c289a41094d647b37f15cca1e70e30d759af1eda3b79 # shrinks to tier = Remux, width = 1280, height = 720

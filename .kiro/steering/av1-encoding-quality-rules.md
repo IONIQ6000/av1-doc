@@ -1,123 +1,169 @@
 ---
 inclusion: always
 ---
+---
+inclusion: always
+---
 
-# AV1 Encoding Rules (Quality-First, Remux vs WEB-DL)
+# Intel Arc (QSV) AV1 Encoding — Quality-First Steering for Kiro
 
-You are helping me encode video to AV1 using **ffmpeg + SVT-AV1** (or SVT-AV1-PSY if available).  Your **primary goal is perceptual quality preservation**, *not* maximum compression ratio.
+This steering document is for your exact stack:
+- **Hardware:** Intel Arc GPU (Quick Sync Video)
+- **Encoder:** `av1_qsv` (Intel hardware AV1 via oneVPL / Media Driver)
+- **Driver:** iHD (`/dev/dri/renderD128`)
+- **Pipeline:** software decode → filters (pad/setsar/format=nv12) → `hwupload` → `av1_qsv` → AV1 output
 
-AV1 is typically more efficient than H.264/AVC by ~30–50% at equal quality, but that advantage **shrinks at high bitrates**, so you must not assume you can cut 90–95% bitrate on high-quality masters without visible loss.
+You previously used `global_quality=36` and got over‑compressed results. For remuxes you've corrected to about `global_quality=29`, which is the right direction for QSV quality mode.
 
 ---
 
-## 1) Always classify the source BEFORE choosing CRF/preset
+## 0) Prime directive
 
-Classify into one of these three buckets. If unclear, assume the higher-quality bucket.
+When converting to AV1 with QSV, **optimize for maximum perceptual quality**.  **Do not** chase compression efficiency or target file size unless I explicitly ask.
 
-### A. REMUX / DISC MASTER
-
-Examples: Blu-ray remux, UHD remux, ProRes/mezzanine, "full bitrate" releases.  These are usually near the top of the rate–distortion curve already; aggressive AV1 CRF will wipe grain/texture.
-
-### B. WEB-DL / STREAMING DOWNLOAD
-
-Examples: Netflix/Apple/Amazon WEB-DLs, already encoded delivery files.  Re-encoding can compound artifacts; aim for modest savings only.
-
-### C. LOW-QUALITY RIP
-
-Already artifacted or low-bitrate sources.  Quality ceiling is low; size reduction is acceptable.
+If there is any doubt between "smaller" and "better looking," choose **better looking**.
 
 ---
 
-## 2) Pick settings by bucket (starting points + allowed ranges)
+## 1) How QSV quality mode actually works (so you don't mis‑select profiles)
 
-CRF meaning: **lower CRF = higher quality / larger file.** SVT-AV1 CRF is 1–63.
+In FFmpeg QSV encoders, setting `-global_quality` activates a **quality‑based rate control** (ICQ / LA_ICQ / CQP depending on other flags).  For ICQ modes, the valid **global_quality range is 1–51, with 1 = best quality**. Lower number = better quality / larger file.  FFmpeg will select:
+- **CQP** if `-qscale` is also set
+- **LA_ICQ** if `look_ahead` is enabled
+- **ICQ** otherwise (normal case)
 
-Preset meaning: **lower preset number = better compression/quality but slower.**
-
-### A. REMUX / DISC MASTER (quality-preserve)
-
-**Goal:** keep grain, fine texture, subtle gradients.
-
-**Defaults**
-- Prefer **SVT-AV1-PSY** when possible for better perceptual/grain behavior.
-- Preset: **2–4** (default **3**).
-- Bit depth: keep **10-bit** if source is 10-bit/HDR.
-
-**CRF targets**
-- **1080p Blu-ray remux:** start **CRF 20–21**, allowed **18–23**.  (Community practice for Blu-ray masters commonly lands in ~16–23 depending on grain/detail.)
-- **2160p UHD/HDR remux:** start **CRF 22–24**, allowed **20–26**.
-
-**Grain handling**
-- If visible grain/noise: enable **film grain synthesis**.  
-  - Use `-svtav1-params film-grain=X` where X is **1–50**. Start around **6–10** (default **8**).
-- Film grain synthesis can save large bitrate while keeping the *appearance* of grain.
-- If using SVT-AV1-HDR/PSY, prefer **Tune 3 (Film Grain)** for grain retention and temporal consistency.
-
-**Mandatory preflight**
-- **Never full-encode a remux without a short test.**
-  1. Pick **30–60 seconds** spanning:
-     - darkest scene
-     - most grain/texture-heavy scene
-     - highest motion scene
-  2. Encode test at the chosen settings.
-  3. If grain smears/looks waxy → **lower CRF by 2** *or* slow preset by 1.
+So treat `global_quality` as **QP-like**:
+- **lower = higher quality**
+- **higher = more compression / more loss**
 
 ---
 
-### B. WEB-DL / STREAMING DOWNLOAD (conservative)
+## 2) Always classify the source first
 
-**Goal:** modest size reduction without adding artifacts.
+You MUST classify before choosing `global_quality`:
 
-**Defaults**
-- Preset: **4–6** (default **5**).
-- If WEB-DL is already **HEVC/AV1/VP9 and looks clean**, default to **no re-encode** unless I explicitly request it.
+1. **REMUX / DISC MASTER**  
+   Blu‑ray/UHD remux, ProRes/mezzanine, high‑bitrate masters.  Goal: preserve grain, fine textures, gradients.
 
-**CRF targets**
-- **1080p H.264 WEB-DL:** start **CRF 26–28**, allowed **24–30**.
-- **2160p WEB-DL:** start **CRF 28–30**, allowed **26–32**.
+2. **WEB‑DL / STREAMING DOWNLOAD**  
+   Already delivery‑encoded.  Goal: *avoid compounding artifacts*; re‑encode only if asked.
 
-**Grain**
-- **Do not** enable grain synth unless:
-  - source clearly has grain *and*
-  - artifacts are low.
+3. **LOW‑QUALITY RIP**  
+   Already artifacted/low bitrate.  Goal: size reduction okay.
+
+If unclear, assume the **higher‑quality bucket**.
 
 ---
 
-### C. LOW-QUALITY RIP (size-first OK)
+## 3) Quality bands for `av1_qsv` (starting points + allowed ranges)
 
-**Goal:** compress more; quality already limited.
+These are **quality‑first defaults** for Intel Arc AV1 QSV.  They are not size‑targets; if artifacts appear, **lower global_quality**.
 
-- Preset: **6–8**
-- CRF: **30–35**
-- No grain synthesis.
+### A) REMUX / DISC MASTER
+
+**Goal:** preserve everything.
+
+- **Start:** `global_quality 28–30` (default **29**)
+- **Allowed:** `24–31`  
+  - If you see *any* grain smearing, banding, or waxiness → **drop by 2** (e.g., 29 → 27).
+
+### B) WEB‑DL / STREAMING DOWNLOAD
+
+**Goal:** conservative savings only.
+
+- If source is already **clean HEVC/AV1/VP9** → **default to NO re‑encode** unless I request it.
+- If re‑encoding H.264 WEB‑DL:
+  - **Start:** `global_quality 30–34` (default **32**)
+  - **Allowed:** `28–36`
+
+### C) LOW‑QUALITY RIP
+
+**Goal:** size reduction OK.
+
+- **Start:** `global_quality 34–38`
+- **Allowed:** `32–40`
 
 ---
 
-## 3) Output format you MUST follow
+## 4) Preset rules (QSV presets are real quality knobs)
 
-Whenever you propose an encode, you must:
+QSV presets are strings from **veryfast → veryslow**.  Slower presets trade speed for better compression decisions / fewer artifacts.
 
-1. **State the source bucket** and why.
-2. List chosen:
-   - CRF
+**Quality‑first defaults:**
+- **REMUX:** `-preset slower` or `-preset veryslow`
+- **WEB‑DL:** `-preset medium` to `-preset slow`
+- **LOW‑QUALITY:** `-preset medium` or faster is fine
+
+Never switch to a faster preset to "save time" if it harms quality.
+
+---
+
+## 5) Optional quality boosts (use when supported)
+
+These are AV1 QSV options FFmpeg exposes:
+
+- `-extbrc 1`  
+  Enables extended bitrate control. Needed for lookahead in AV1.
+
+- `-look_ahead_depth N` (e.g., 32–64)  
+  With `extbrc=1` **and** `global_quality` set, QSV may use **LA_ICQ** (quality‑based lookahead).  This can improve motion/detail retention. If runtime rejects it, fall back to plain ICQ.
+
+- `-low_power 0`  
+  Keep low‑power **off** for best quality (low_power is for saving GPU/power).
+
+Other AV1 QSV flags (`adaptive_i`, `adaptive_b`, `b_strategy`) can be left at defaults unless I ask; do not flip them blindly.
+
+---
+
+## 6) Mandatory test‑clip workflow (REMUX only)
+
+Never full‑encode a remux without a test.
+
+1. Pick a **30–60s clip** containing:
+   - darkest scene  
+   - most grain/texture  
+   - highest motion
+2. Encode at the selected settings.
+3. If any artifacting appears:
+   - **lower global_quality by 2**, *or*  
+   - slow the preset one step.
+
+Only then run the full encode.
+
+---
+
+## 7) Command template you should generate
+
+### REMUX test clip (example)
+
+```bash
+ffmpeg -ss {START} -t {DURATION} -i "{INPUT}" \
+  -vf "pad=...,setsar=1,format=nv12,hwupload=extra_hw_frames=64" \
+  -c:v av1_qsv -global_quality 29 -preset slower \
+  -extbrc 1 -look_ahead_depth 40 -low_power 0 \
+  -c:a copy "{OUT_TEST}.mkv"
+```
+
+### Full encode (after test)
+
+Same settings, remove `-ss/-t`, and output final file.
+
+---
+
+## 8) Output requirements
+
+Whenever you propose an encode, you MUST:
+
+1. State the **source bucket** and reason.
+2. State chosen:
+   - `global_quality`
    - preset
-   - bit depth
-   - tune (if any)
-   - film-grain strength (if any)
-3. If bucket = REMUX:
-   - show **test-clip command first**
-   - then the full encode command
-4. Prefer **CRF/constant-quality** over ABR unless I give a target bitrate.
+   - whether `extbrc/look_ahead_depth` are used
+3. For REMUX: provide **test command first**, then full command.
+4. Never raise `global_quality` to chase efficiency unless I ask.
 
 ---
 
-## 4) Reference SVT-AV1 parameter hints (for your commands)
+### Reminder
 
-- CRF example: `-crf 21` (lower = better).
-- Preset example: `-preset 3` (lower = slower/better).
-- Film grain synthesis: `-svtav1-params film-grain=8` (1–50).
-- Tune 3 for grain (HDR/PSY builds): improves grain retention; recommended CRF window is broad but you will follow the bucket CRF targets above.
-
----
-
-**Bottom line:**  High-quality sources get **low CRF + slower preset + grain protection**.  Already-compressed web sources get **higher CRF + moderate preset** and sometimes **no re-encode**.  You are optimizing for what looks best to humans, not what looks best on a bitrate chart.
+Your stack is **Intel QSV `av1_qsv`**, not SVT‑AV1.  So all quality decisions are controlled by `global_quality` (ICQ/CQP/LA_ICQ), **not CRF**.

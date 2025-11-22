@@ -1,6 +1,16 @@
 # Installation Guide for Debian 13 Trixie
 
-This guide covers installing the AV1 Daemon on Debian 13 Trixie containers.
+> **⚠️ DEPRECATED**: This guide covers the legacy Docker-based hardware encoding approach.
+> 
+> **For new installations**, please use the [Software AV1 Encoding Installation Guide](INSTALL_SOFTWARE_AV1.md) which provides:
+> - Native FFmpeg 8.0+ (no Docker required)
+> - CPU-based AV1 encoding with quality-first approach
+> - Better quality preservation for high-quality sources
+> - Intelligent source classification and test clip workflow
+>
+> This guide is maintained for existing Docker-based installations only.
+
+This guide covers installing the AV1 Daemon on Debian 13 Trixie containers using Docker-based hardware encoding.
 
 ## Quick Install
 

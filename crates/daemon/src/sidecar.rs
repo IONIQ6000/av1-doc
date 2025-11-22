@@ -4,8 +4,9 @@ use std::fs;
 use chrono::{DateTime, Utc};
 use crate::job::Job;
 use crate::classifier::WebSourceDecision;
-use crate::ffmpeg_docker::{EncodingParams, ValidationResult};
-use crate::ffprobe::{FFProbeData, BitDepth};
+use crate::quality::EncodingParams;
+use crate::ffmpeg_native::ValidationResult;
+use crate::ffprobe::FFProbeData;
 
 /// Check if a skip marker (.av1skip) exists for a file
 pub fn has_skip_marker(file_path: &Path) -> Result<bool> {
@@ -227,24 +228,26 @@ pub fn write_conversion_report(
     content.push_str("│ ENCODING PARAMETERS                                                     │\n");
     content.push_str("└─────────────────────────────────────────────────────────────────────────┘\n\n");
     
-    content.push_str("Hardware Encoder: Intel QSV (Quick Sync Video)\n");
-    content.push_str("Codec:            av1_qsv\n");
-    content.push_str("Device:           /dev/dri/renderD128\n");
-    content.push_str("Driver:           iHD (Intel Media Driver)\n");
+    content.push_str("Software Encoder: CPU-based AV1 encoding\n");
+    content.push_str("Codec:            Software AV1 (libsvtav1/libaom-av1/librav1e)\n");
     content.push_str("\n");
     
     content.push_str(&format!("Target Bit Depth: {:?}\n", report.encoding_params.bit_depth));
     content.push_str(&format!("Pixel Format:     {}\n", report.encoding_params.pixel_format));
-    content.push_str(&format!("AV1 Profile:      {} (main)\n", report.encoding_params.av1_profile));
-    content.push_str(&format!("Quality (QP):     {} (lower = higher quality)\n", report.encoding_params.qp));
-    content.push_str(&format!("HDR Encoding:     {}\n", if report.encoding_params.is_hdr { "Yes" } else { "No" }));
+    content.push_str(&format!("Quality (CRF):    {} (lower = higher quality)\n", report.encoding_params.crf));
+    content.push_str(&format!("Preset:           {} (lower = slower/better quality)\n", report.encoding_params.preset));
+    
+    if let Some(tune) = report.encoding_params.tune {
+        content.push_str(&format!("Tune:             {}\n", tune));
+    }
+    
+    if let Some(grain) = report.encoding_params.film_grain {
+        content.push_str(&format!("Film Grain:       {} (grain synthesis enabled)\n", grain));
+    }
     
     content.push_str("\nFilter Chain:\n");
-    content.push_str("  1. pad=ceil(iw/2)*2:ceil(ih/2)*2  (ensure even dimensions)\n");
-    content.push_str("  2. setsar=1                        (set sample aspect ratio)\n");
-    content.push_str(&format!("  3. format={}                   (pixel format conversion)\n", 
+    content.push_str(&format!("  1. format={}  (pixel format conversion)\n", 
         report.encoding_params.pixel_format));
-    content.push_str("  4. hwupload                        (upload to GPU memory)\n");
     
     content.push_str("\nStream Handling:\n");
     content.push_str("  • Video:     Transcoded to AV1 (QSV hardware acceleration)\n");

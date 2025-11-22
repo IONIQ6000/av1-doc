@@ -3,14 +3,17 @@ use clap::Parser;
 use daemon::{
     config::TranscodeConfig, 
     job::{self, Job, JobStatus, load_all_jobs, save_job},
-    scan, ffprobe, classifier, ffmpeg_docker, sidecar,
+    scan, ffprobe, classifier, sidecar,
+    FFmpegManager, CommandBuilder,
+    quality::QualityCalculator,
+    classifier::QualityTier,
+    test_clip::TestClipWorkflow,
 };
 use std::path::{Path, PathBuf};
 use std::fs;
 use std::collections::{HashMap, HashSet};
 use chrono::{Utc, DateTime};
 use log::{info, warn, error, debug};
-use tokio::process::Command;
 
 /// Generate temp output path using configured temp_output_dir
 fn get_temp_output_path(cfg: &TranscodeConfig, source_path: &Path) -> PathBuf {
@@ -55,6 +58,18 @@ async fn main() -> Result<()> {
     info!("  Max size ratio: {}", cfg.max_size_ratio);
     info!("  Job state dir: {}", cfg.job_state_dir.display());
     info!("  Scan interval: {}s", cfg.scan_interval_secs);
+    
+    // Initialize FFmpeg Manager
+    info!("Initializing FFmpeg Manager...");
+    let ffmpeg_mgr = FFmpegManager::new(&cfg).await
+        .context("Failed to initialize FFmpeg Manager - ensure FFmpeg 8.0+ is installed with AV1 encoder support")?;
+    
+    info!("✅ FFmpeg Manager initialized successfully");
+    info!("  FFmpeg version: {}.{}.{}", 
+          ffmpeg_mgr.version.major, 
+          ffmpeg_mgr.version.minor, 
+          ffmpeg_mgr.version.patch);
+    info!("  Selected encoder: {:?}", ffmpeg_mgr.best_encoder());
     
     // Verify library roots exist
     for root in &cfg.library_roots {
@@ -210,7 +225,7 @@ async fn main() -> Result<()> {
                 save_job(job, &cfg.job_state_dir)?;
 
                 // Process the job (this will block until complete)
-                match process_job(&cfg, job).await {
+                match process_job(&cfg, &ffmpeg_mgr, job).await {
                     Ok(()) => {
                         info!("✅ Job {} completed successfully", job.id);
                     }
@@ -317,62 +332,7 @@ fn check_file_activity_with_state(
     Ok((has_activity, current_size, current_mtime))
 }
 
-/// Verify if Docker container is running for a job
-/// Checks if any Docker containers exist with ffmpeg process matching the job's file path
-async fn verify_docker_container_exists(cfg: &TranscodeConfig, job: &Job) -> Result<bool> {
-    use std::process::Stdio;
-    
-    // Try to find Docker containers that might be running ffmpeg for this job
-    // We'll check containers with volume mounts matching the job's parent directory
-    
-    let parent_dir = job.source_path.parent()
-        .context("Job source path has no parent directory")?;
-    
-    // List running Docker containers
-    let output = Command::new(&cfg.docker_bin)
-        .arg("ps")
-        .arg("--format")
-        .arg("{{.ID}} {{.Command}} {{.Mounts}}")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .context("Failed to execute docker ps")?;
-    
-    if !output.status.success() {
-        warn!("Docker ps failed, assuming container check unavailable");
-        return Ok(true); // Assume container exists if we can't check (fail open)
-    }
-    
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    
-    // Check if any container has:
-    // 1. ffmpeg in the command
-    // 2. The parent directory in mounts
-    // 3. The temp output file name pattern
-    
-    let temp_output = job.source_path.with_extension("tmp.av1.mkv");
-    let output_basename = temp_output.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    
-    for line in stdout.lines() {
-        if line.contains("ffmpeg") || line.contains("ffprobe") {
-            // Check if this container has the relevant volume mount
-            if line.contains(parent_dir.to_str().unwrap_or("")) {
-                // Found a container that might be ours
-                // Additional check: see if it has the output file in the command
-                if output_basename.is_empty() || line.contains(output_basename) {
-                    debug!("Found potential Docker container for job {}: {}", job.id, line);
-                    return Ok(true);
-                }
-            }
-        }
-    }
-    
-    debug!("No Docker container found for job {}", job.id);
-    Ok(false)
-}
+
 
 
 /// Recover stuck jobs - check for jobs in Running status that are actually abandoned
@@ -405,7 +365,6 @@ async fn recover_stuck_jobs(cfg: &TranscodeConfig) -> Result<usize> {
             now - started
         } else {
             // Job has Running status but no started_at - definitely stuck
-            is_stuck = true;
             stuck_reasons.push("no started_at timestamp".to_string());
             recover_job_safely(cfg, &mut job, now, &stuck_reasons.join(", "), &mut progress_state)?;
             recovered_count += 1;
@@ -417,35 +376,8 @@ async fn recover_stuck_jobs(cfg: &TranscodeConfig) -> Result<usize> {
             stuck_reasons.push(format!("time-based timeout (running for {})", format_duration(age)));
         }
         
-        // Signal 2: Docker process check (if enabled)
-        if cfg.stuck_job_check_enable_process && !is_stuck {
-            match verify_docker_container_exists(cfg, &job).await {
-                Ok(container_exists) => {
-                    if !container_exists {
-                        // Check how long container has been missing
-                        if let Some(state) = progress_state.get(&job.id) {
-                            let time_since_last_check = now - state.last_check_time;
-                            // Container missing for more than 2 minutes
-                            if time_since_last_check > chrono::Duration::minutes(2) {
-                                is_stuck = true;
-                                stuck_reasons.push(format!("Docker container missing for {}", format_duration(time_since_last_check)));
-                            }
-                        } else {
-                            // First check, give it a grace period
-                            // But if job has been running for > 2 minutes, container should exist
-                            if age > chrono::Duration::minutes(2) {
-                                is_stuck = true;
-                                stuck_reasons.push("Docker container not found (job running > 2 minutes)".to_string());
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to check Docker container for job {}: {}", job.id, e);
-                    // Fail open - don't mark as stuck if we can't check
-                }
-            }
-        }
+        // Signal 2: Process check disabled for native FFmpeg (no Docker containers to check)
+        // Native FFmpeg runs as direct subprocess, so we rely on file activity checks instead
         
         // Signal 3: File activity check (if enabled)
         if cfg.stuck_job_check_enable_file_activity && !is_stuck {
@@ -565,95 +497,15 @@ fn format_duration(d: chrono::Duration) -> String {
 /// Force requeue a job - stop container, clean files, reset to Pending
 /// Performs safe cleanup with proper error handling
 async fn force_requeue_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
-    use std::process::Stdio;
     
     info!("🔄 Force requeue requested for job {}: {}", job.id, job.source_path.display());
     
     let temp_output = get_temp_output_path(cfg, &job.source_path);
     let orig_backup = job.source_path.with_extension("orig.mkv");
     
-    // Step 1: Try to stop Docker container if it exists
-    // Search for containers with ffmpeg that might be running this job
-    let parent_dir = job.source_path.parent()
-        .context("Job source path has no parent directory")?;
-    
-    // List all running Docker containers
-    let output = Command::new(&cfg.docker_bin)
-        .arg("ps")
-        .arg("--format")
-        .arg("{{.ID}} {{.Command}} {{.Mounts}}")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .context("Failed to execute docker ps")?;
-    
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let output_basename = temp_output.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-        
-        // Find matching containers
-        for line in stdout.lines() {
-            if (line.contains("ffmpeg") || line.contains("ffprobe")) 
-                && line.contains(parent_dir.to_str().unwrap_or(""))
-                && (output_basename.is_empty() || line.contains(output_basename)) {
-                // Extract container ID (first field)
-                if let Some(container_id) = line.split_whitespace().next() {
-                    info!("Job {}: Found Docker container {} - attempting graceful stop", job.id, container_id);
-                    
-                    // Try graceful stop first
-                    let stop_output = Command::new(&cfg.docker_bin)
-                        .arg("stop")
-                        .arg("--time")
-                        .arg("10")
-                        .arg(container_id)
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .output()
-                        .await;
-                    
-                    match stop_output {
-                        Ok(output) if output.status.success() => {
-                            info!("Job {}: ✅ Gracefully stopped container {}", job.id, container_id);
-                            // Wait a bit for cleanup
-                            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                            
-                            // Remove container (should already be removed if --rm was used, but check)
-                            let _ = Command::new(&cfg.docker_bin)
-                                .arg("rm")
-                                .arg(container_id)
-                                .output()
-                                .await;
-                        }
-                        Ok(output) => {
-                            warn!("Job {}: Graceful stop failed for container {}: {}", 
-                                  job.id, container_id, String::from_utf8_lossy(&output.stderr));
-                            // Try force kill
-                            let kill_output = Command::new(&cfg.docker_bin)
-                                .arg("kill")
-                                .arg(container_id)
-                                .output()
-                                .await;
-                            
-                            if let Ok(kill_out) = kill_output {
-                                if kill_out.status.success() {
-                                    info!("Job {}: ⚠️  Force killed container {}", job.id, container_id);
-                                } else {
-                                    warn!("Job {}: Failed to kill container {}: {}", 
-                                          job.id, container_id, String::from_utf8_lossy(&kill_out.stderr));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Job {}: Failed to stop container {}: {}", job.id, container_id, e);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Step 1: No Docker containers to stop (native FFmpeg runs as direct subprocess)
+    // If a job is stuck, the subprocess should have already terminated or will be orphaned
+    info!("Job {}: Native FFmpeg mode - no containers to stop", job.id);
     
     // Step 2: Clean up temp file
     if temp_output.exists() {
@@ -1003,11 +855,11 @@ async fn extract_metadata_for_job(
 }
 
 /// Process a single job: probe, classify, transcode, and apply size gate
-async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
+async fn process_job(cfg: &TranscodeConfig, ffmpeg_mgr: &FFmpegManager, job: &mut Job) -> Result<()> {
     info!("Job {}: Starting ffprobe for {}", job.id, job.source_path.display());
     
     // Step 1: Run ffprobe to get metadata
-    let meta = match ffprobe::probe_file(cfg, &job.source_path).await {
+    let meta = match ffprobe::probe_file_native(ffmpeg_mgr, &job.source_path).await {
         Ok(m) => m,
         Err(e) => {
             error!("Job {}: ffprobe failed: {}", job.id, e);
@@ -1155,26 +1007,46 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         warn!("Job {}: ❌ No video stream found - cannot extract metadata for estimation", job.id);
     }
 
-    // Step 4: Classify source
-    let decision = classifier::classify_web_source(&job.source_path, &meta.format, &meta.streams);
-    job.is_web_like = decision.is_web_like();
-    info!("Job {}: 🎯 Source classification: {:?} (score: {:.2}, web_like: {})", 
-          job.id, decision.class, decision.score, job.is_web_like);
+    // Step 4: Classify source using enhanced SourceClassifier
+    let classifier = classifier::SourceClassifier::new();
+    let classification = classifier.classify(&job.source_path, &meta.format, &meta.streams);
+    
+    // Store quality tier in job
+    job.quality_tier = Some(match classification.tier {
+        QualityTier::Remux => "Remux".to_string(),
+        QualityTier::WebDl => "WebDl".to_string(),
+        QualityTier::LowQuality => "LowQuality".to_string(),
+    });
+    
+    info!("Job {}: 🎯 Source classification: {:?} (confidence: {:.2})", 
+          job.id, classification.tier, classification.confidence);
     info!("Job {}: 📋 Classification reasons:", job.id);
-    for reason in &decision.reasons {
+    for reason in &classification.reasons {
         info!("Job {}:    - {}", job.id, reason);
     }
     
+    // Check if we should skip re-encoding for clean WEB-DL sources
+    if classifier.should_skip_encode(&classification, &meta.streams) {
+        let reason = format!("clean {:?} source with modern codec - skipping re-encode", classification.tier);
+        info!("Job {}: Skipping - {}", job.id, reason);
+        sidecar::write_why_txt(&job.source_path, &reason)?;
+        job.status = JobStatus::Skipped;
+        job.reason = Some(reason);
+        job.finished_at = Some(Utc::now());
+        save_job(job, &cfg.job_state_dir)?;
+        return Ok(());
+    }
+    
     // Log encoding strategy based on classification
-    match decision.class {
-        daemon::classifier::SourceClass::WebLike => {
-            info!("Job {}: 🌐 Using WEB encoding strategy (VFR handling, timestamp fixes)", job.id);
+    match classification.tier {
+        QualityTier::Remux => {
+            info!("Job {}: 💎 Using REMUX encoding strategy (quality-first, test clip workflow)", job.id);
         }
-        daemon::classifier::SourceClass::DiscLike => {
-            info!("Job {}: 💿 Using DISC encoding strategy (standard CFR processing)", job.id);
+        QualityTier::WebDl => {
+            info!("Job {}: 🌐 Using WEB-DL encoding strategy (conservative re-encoding)", job.id);
         }
-        daemon::classifier::SourceClass::Unknown => {
-            warn!("Job {}: ❓ Unknown source type - using conservative encoding strategy", job.id);
+        QualityTier::LowQuality => {
+            info!("Job {}: 📦 Using LOW-QUALITY encoding strategy (size optimization)", job.id);
         }
     }
 
@@ -1188,41 +1060,120 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     
     info!("Job {}: Temp output will be: {}", job.id, temp_output.display());
 
-    // Step 6: Determine encoding parameters
-    // Analyzes source properties (resolution, bitrate, codec, fps, bit depth)
-    // to determine optimal encoding settings
-    let encoding_params = ffmpeg_docker::determine_encoding_params(&meta, &job.source_path);
+    // Step 6: Calculate encoding parameters using QualityCalculator
+    let quality_calc = QualityCalculator::new();
+    let encoding_params = quality_calc.calculate_params(
+        &classification,
+        &meta,
+        ffmpeg_mgr.best_encoder(),
+    );
     
-    job.av1_quality = Some(encoding_params.qp);
+    // Store encoding parameters in job
+    job.crf_used = Some(encoding_params.crf);
+    job.preset_used = Some(encoding_params.preset);
+    job.encoder_used = Some(format!("{:?}", ffmpeg_mgr.best_encoder()));
     job.target_bit_depth = Some(match encoding_params.bit_depth {
         daemon::BitDepth::Bit8 => 8,
         daemon::BitDepth::Bit10 => 10,
         daemon::BitDepth::Unknown => 8,
     });
-    job.av1_profile = Some(encoding_params.av1_profile);
     
-    info!("Job {}: Encoding plan - Source: {}-bit{} → Target: {}-bit AV1 (profile {}), QP: {}",
+    info!("Job {}: Encoding plan - Source: {}-bit{} → Target: {}-bit AV1",
           job.id,
           job.source_bit_depth.unwrap_or(8),
           if job.is_hdr.unwrap_or(false) { " HDR" } else { "" },
-          job.target_bit_depth.unwrap_or(8),
-          job.av1_profile.unwrap_or(0),
-          encoding_params.qp
+          job.target_bit_depth.unwrap_or(8)
     );
+    info!("Job {}: Encoder: {:?}, CRF: {}, Preset: {}", 
+          job.id, ffmpeg_mgr.best_encoder(), encoding_params.crf, encoding_params.preset);
+    if let Some(tune) = encoding_params.tune {
+        info!("Job {}: Tune: {}", job.id, tune);
+    }
+    if let Some(film_grain) = encoding_params.film_grain {
+        info!("Job {}: Film grain: {}", job.id, film_grain);
+    }
     
     // Save job with encoding parameters before encoding starts
     save_job(job, &cfg.job_state_dir)?;
     
-    // Step 7: Run transcoding
-    info!("Job {}: Starting ffmpeg transcoding with QP: {}...", job.id, encoding_params.qp);
-    let ffmpeg_result = match ffmpeg_docker::run_av1_qsv_job(
-        cfg,
+    // Step 7: Test clip workflow for REMUX sources
+    if matches!(classification.tier, QualityTier::Remux) && cfg.enable_test_clip_workflow {
+        info!("Job {}: 🎬 Starting test clip workflow for REMUX source", job.id);
+        
+        let test_clip_workflow = TestClipWorkflow::new(cfg.temp_output_dir.clone());
+        
+        // Extract test clip
+        let test_clip_info = match test_clip_workflow.extract_test_clip(&job.source_path, &meta, ffmpeg_mgr).await {
+            Ok(info) => {
+                info!("Job {}: ✅ Test clip extracted: {} ({:.1}s at {:.1}s)", 
+                      job.id, info.clip_path.display(), info.duration, info.start_time);
+                job.test_clip_path = Some(info.clip_path.clone());
+                save_job(job, &cfg.job_state_dir)?;
+                Some(info)
+            }
+            Err(e) => {
+                warn!("Job {}: ⚠️  Test clip extraction failed (non-fatal): {}", job.id, e);
+                warn!("Job {}: Proceeding with full encode without test clip", job.id);
+                // Continue without test clip
+                None
+            }
+        };
+        
+        // If test clip was extracted, encode it and await user approval
+        if let Some(clip_info) = test_clip_info {
+            info!("Job {}: 🎬 Encoding test clip with proposed parameters...", job.id);
+            
+            let test_output = match test_clip_workflow.encode_test_clip(
+                &clip_info,
+                &encoding_params,
+                ffmpeg_mgr,
+                &meta,
+            ).await {
+                Ok(output) => {
+                    info!("Job {}: ✅ Test clip encoded: {}", job.id, output.display());
+                    Some(output)
+                }
+                Err(e) => {
+                    warn!("Job {}: ⚠️  Test clip encoding failed (non-fatal): {}", job.id, e);
+                    warn!("Job {}: Proceeding with full encode", job.id);
+                    // Clean up test clip
+                    if clip_info.clip_path.exists() {
+                        fs::remove_file(&clip_info.clip_path).ok();
+                    }
+                    // Continue without test clip approval
+                    None
+                }
+            };
+            
+            // If test clip encoded successfully, auto-approve for now
+            // TODO: Implement actual user approval mechanism (TUI command, file-based, etc.)
+            if test_output.is_some() {
+                info!("Job {}: ✅ Test clip encoded successfully - auto-approving for now", job.id);
+                info!("Job {}: TODO: Implement user approval mechanism", job.id);
+                job.test_clip_approved = Some(true);
+                save_job(job, &cfg.job_state_dir)?;
+            }
+        }
+    }
+    
+    // Step 8: Run full transcoding
+    info!("Job {}: Starting ffmpeg transcoding with CRF: {}, Preset: {}...", 
+          job.id, encoding_params.crf, encoding_params.preset);
+    
+    // Build FFmpeg command
+    let cmd_builder = CommandBuilder::new();
+    let ffmpeg_args = cmd_builder.build_encode_command(
         &job.source_path,
         &temp_output,
-        &meta,
-        &decision,
         &encoding_params,
-    ).await {
+        ffmpeg_mgr.best_encoder(),
+        &meta,
+    );
+    
+    info!("Job {}: FFmpeg command: ffmpeg {}", job.id, ffmpeg_args.join(" "));
+    
+    // Execute FFmpeg (no timeout - let it run as long as needed)
+    let ffmpeg_result = match ffmpeg_mgr.execute_ffmpeg(ffmpeg_args, None).await {
         Ok(result) => result,
         Err(e) => {
             error!("Job {}: Failed to execute ffmpeg command: {}", job.id, e);
@@ -1241,16 +1192,12 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
             return Ok(());
         }
     };
-
-    // Store QP from ffmpeg result (should match what we calculated)
-    job.av1_quality = Some(ffmpeg_result.quality_used);
-    info!("Job {}: Encoding completed with QP: {}", job.id, ffmpeg_result.quality_used);
     
-    if ffmpeg_result.exit_code != 0 {
-        error!("Job {}: ffmpeg failed with exit code {}", job.id, ffmpeg_result.exit_code);
+    if !ffmpeg_result.success {
+        error!("Job {}: ffmpeg failed with exit code {:?}", job.id, ffmpeg_result.exit_code);
         error!("Job {}: ffmpeg STDOUT: {}", job.id, ffmpeg_result.stdout);
         error!("Job {}: ffmpeg STDERR: {}", job.id, ffmpeg_result.stderr);
-        let reason = format!("ffmpeg exit code {}", ffmpeg_result.exit_code);
+        let reason = format!("ffmpeg exit code {:?}", ffmpeg_result.exit_code);
         sidecar::write_why_txt(&job.source_path, &reason)?;
         // Delete temp file on failure
         if temp_output.exists() {
@@ -1321,21 +1268,21 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         return Ok(());
     }
 
-    // Step 7.5: Validate output file for corruption
+    // Step 9: Validate output file for corruption
     info!("Job {}: Running output validation to detect corruption...", job.id);
-    let expected_bit_depth = match encoding_params.bit_depth {
-        daemon::BitDepth::Bit8 => daemon::BitDepth::Bit8,
-        daemon::BitDepth::Bit10 => daemon::BitDepth::Bit10,
-        daemon::BitDepth::Unknown => daemon::BitDepth::Bit8,
-    };
     
-    let validation_result = match ffmpeg_docker::validate_output(cfg, &temp_output, expected_bit_depth).await {
-        Ok(validation) => {
-            if !validation.is_valid {
-                let reason = format!("output validation failed: {}", validation.issues.join(", "));
+    // Use ffprobe to validate the output
+    let _validation_result = match ffprobe::probe_file_native(ffmpeg_mgr, &temp_output).await {
+        Ok(output_meta) => {
+            // Check if output has video streams
+            let has_video = output_meta.streams.iter().any(|s| s.codec_type.as_deref() == Some("video"));
+            let has_av1 = output_meta.streams.iter().any(|s| s.codec_name.as_deref() == Some("av1"));
+            
+            if !has_video {
+                let reason = "output validation failed: no video streams found".to_string();
                 error!("Job {}: ❌ {}", job.id, reason);
                 sidecar::write_why_txt(&job.source_path, &reason)?;
-                fs::remove_file(&temp_output).ok(); // Clean up corrupted file
+                fs::remove_file(&temp_output).ok();
                 job.status = JobStatus::Failed;
                 job.reason = Some(reason);
                 job.finished_at = Some(Utc::now());
@@ -1343,21 +1290,25 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
                 return Ok(());
             }
             
-            if !validation.warnings.is_empty() {
-                warn!("Job {}: ⚠️  Output validation warnings: {}", job.id, validation.warnings.len());
-                for warning in &validation.warnings {
-                    warn!("Job {}:    - {}", job.id, warning);
-                }
-            } else {
-                info!("Job {}: ✅ Output validation passed with no warnings", job.id);
+            if !has_av1 {
+                let reason = "output validation failed: output is not AV1".to_string();
+                error!("Job {}: ❌ {}", job.id, reason);
+                sidecar::write_why_txt(&job.source_path, &reason)?;
+                fs::remove_file(&temp_output).ok();
+                job.status = JobStatus::Failed;
+                job.reason = Some(reason);
+                job.finished_at = Some(Utc::now());
+                save_job(job, &cfg.job_state_dir)?;
+                return Ok(());
             }
             
-            Some(validation)
+            info!("Job {}: ✅ Output validation passed - AV1 video stream confirmed", job.id);
+            true
         }
         Err(e) => {
             warn!("Job {}: ⚠️  Output validation failed to run (non-fatal): {}", job.id, e);
             // Don't fail the job if validation itself fails - just log it
-            None
+            false
         }
     };
 
@@ -1487,12 +1438,6 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     }
 
     // Step 11: Update job status to Success - ALL CHECKS PASSED, FILE REPLACED, ORIGINAL DELETED
-    // Quality should already be set from ffmpeg_result, but ensure it's stored
-    if job.av1_quality.is_none() {
-        // Fallback: if quality wasn't set, use the one from ffmpeg result
-        job.av1_quality = Some(ffmpeg_result.quality_used);
-    }
-    
     let end_time = Utc::now();
     job.status = JobStatus::Success;
     job.output_path = Some(job.source_path.clone());
@@ -1500,29 +1445,28 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
     job.finished_at = Some(end_time);
     save_job(job, &cfg.job_state_dir)?;
 
-    info!("Job {}: ✅ SUCCESS - Original file deleted, transcoded file in place (quality: {})", 
-          job.id, job.av1_quality.unwrap_or(0));
+    info!("Job {}: ✅ SUCCESS - Original file deleted, transcoded file in place (CRF: {}, Preset: {})", 
+          job.id, job.crf_used.unwrap_or(0), job.preset_used.unwrap_or(0));
     
-    // Step 12: Generate comprehensive conversion report
-    info!("Job {}: 📝 Generating detailed conversion report...", job.id);
-    let report = sidecar::ConversionReport {
-        job: job.clone(),
-        source_meta: meta.clone(),
-        classification: decision.clone(),
-        encoding_params: encoding_params.clone(),
-        validation: validation_result,
-        ffmpeg_stderr: Some(ffmpeg_result.stderr.clone()),
-        start_time: job.started_at.unwrap_or(end_time),
-        end_time,
-    };
+    // Step 12: Write simple completion marker
+    info!("Job {}: 📝 Writing completion marker...", job.id);
+    let completion_msg = format!(
+        "Transcoded successfully\nEncoder: {:?}\nCRF: {}\nPreset: {}\nQuality Tier: {:?}\nOriginal: {} MB\nNew: {} MB\nSavings: {:.1}%",
+        ffmpeg_mgr.best_encoder(),
+        encoding_params.crf,
+        encoding_params.preset,
+        classification.tier,
+        orig_bytes as f64 / 1_000_000.0,
+        new_bytes as f64 / 1_000_000.0,
+        (1.0 - (new_bytes as f64 / orig_bytes as f64)) * 100.0
+    );
     
-    match sidecar::write_conversion_report(&job.source_path, &report) {
+    match sidecar::write_why_txt(&job.source_path, &completion_msg) {
         Ok(()) => {
-            let report_path = sidecar::conversion_report_path(&job.source_path);
-            info!("Job {}: ✅ Conversion report written: {}", job.id, report_path.display());
+            info!("Job {}: ✅ Completion marker written", job.id);
         }
         Err(e) => {
-            warn!("Job {}: ⚠️  Failed to write conversion report (non-fatal): {}", job.id, e);
+            warn!("Job {}: ⚠️  Failed to write completion marker (non-fatal): {}", job.id, e);
         }
     }
     

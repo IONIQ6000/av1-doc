@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use crate::config::TranscodeConfig;
+use crate::ffmpeg_native::FFmpegManager;
 use tokio::process::Command;
 
 /// Complete ffprobe output structure
@@ -56,7 +57,7 @@ pub struct FFProbeStream {
     pub color_space: Option<String>,
 }
 
-/// Run ffprobe via Docker and parse the JSON output
+/// Run ffprobe directly and parse the JSON output
 pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFProbeData> {
     use log::debug;
     
@@ -64,77 +65,41 @@ pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFPro
     if !file_path.exists() {
         anyhow::bail!("File does not exist: {}", file_path.display());
     }
-    
-    // Get parent directory and basename for Docker volume mounting
-    let parent_dir = file_path
-        .parent()
-        .context("File path has no parent directory")?;
-    let basename = file_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .context("File path has no basename")?;
 
-    // Verify parent directory exists
-    if !parent_dir.exists() {
-        anyhow::bail!("Parent directory does not exist: {}", parent_dir.display());
-    }
+    debug!("ffprobe: probing file {}", file_path.display());
 
-    // Container path will be /config/<basename>
-    // Use proper escaping for paths with spaces/special chars
-    let container_path = format!("/config/{}", basename);
-
-    debug!("ffprobe: mounting {} to /config", parent_dir.display());
-    debug!("ffprobe: probing file {} in container", container_path);
-
-    // Build docker command
-    // Note: Using --privileged flag required when Docker runs inside LXC containers
-    // Use --entrypoint to bypass any entrypoint scripts that might interfere
-    let mut cmd = Command::new(&cfg.docker_bin);
-    cmd.arg("run")
-        .arg("--rm")
-        .arg("--privileged")
-        .arg("--entrypoint")
-        .arg("ffprobe")
-        .arg("-v")
-        .arg("/dev/dri:/dev/dri")
-        .arg("-v")
-        .arg(format!("{}:/config:ro", parent_dir.display()))
-        .arg(&cfg.docker_image)
-        .arg("-v")
+    // Build ffprobe command for direct execution
+    let mut cmd = Command::new(&cfg.ffprobe_bin);
+    cmd.arg("-v")
         .arg("error")
         .arg("-print_format")
         .arg("json")
         .arg("-show_streams")
         .arg("-show_format")
-        .arg(&container_path);
+        .arg(file_path);
     
-    debug!("ffprobe command: docker run --rm --privileged --entrypoint ffprobe --device {}:{} -v {}:/config:ro {} -v error -print_format json -show_streams -show_format {}",
-           cfg.gpu_device.display(), cfg.gpu_device.display(), parent_dir.display(), cfg.docker_image, container_path);
+    debug!("ffprobe command: {} -v error -print_format json -show_streams -show_format {}",
+           cfg.ffprobe_bin.display(), file_path.display());
 
     // Execute and capture output
     let output = cmd
         .output()
         .await
-        .with_context(|| format!("Failed to execute docker ffprobe for: {}", file_path.display()))?;
+        .with_context(|| format!(
+            "Failed to execute ffprobe for: {}. Ensure ffprobe is installed and accessible at: {}",
+            file_path.display(),
+            cfg.ffprobe_bin.display()
+        ))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let exit_code = output.status.code().unwrap_or(-1);
         
-        // Log the full command for debugging
-        debug!("ffprobe command failed. Full command would be:");
-        debug!("  docker run --rm --privileged --device {}:{} -v {}:/config:ro {} ffprobe ...",
-               cfg.gpu_device.display(), cfg.gpu_device.display(),
-               parent_dir.display(), cfg.docker_image);
-        
         anyhow::bail!(
-            "ffprobe failed (exit code {}) for {}:\nParent dir: {}\nBasename: {}\nContainer path: {}\nSTDERR: {}\nSTDOUT: {}",
+            "ffprobe failed (exit code {}) for {}:\nSTDERR: {}\nSTDOUT: {}",
             exit_code,
             file_path.display(),
-            parent_dir.display(),
-            basename,
-            container_path,
             stderr,
             stdout
         );
@@ -145,6 +110,41 @@ pub async fn probe_file(cfg: &TranscodeConfig, file_path: &Path) -> Result<FFPro
         .context("ffprobe output is not valid UTF-8")?;
 
     let data: FFProbeData = serde_json::from_str(&json_str)
+        .with_context(|| format!("Failed to parse ffprobe JSON for: {}", file_path.display()))?;
+
+    Ok(data)
+}
+
+/// Run ffprobe using FFmpegManager (native execution)
+pub async fn probe_file_native(ffmpeg_mgr: &FFmpegManager, file_path: &Path) -> Result<FFProbeData> {
+    use log::debug;
+    
+    // Verify file exists before trying to probe
+    if !file_path.exists() {
+        anyhow::bail!("File does not exist: {}", file_path.display());
+    }
+
+    debug!("ffprobe: probing file {}", file_path.display());
+
+    // Build ffprobe command arguments
+    let args = vec![
+        "-v".to_string(),
+        "error".to_string(),
+        "-print_format".to_string(),
+        "json".to_string(),
+        "-show_streams".to_string(),
+        "-show_format".to_string(),
+        file_path.to_string_lossy().to_string(),
+    ];
+    
+    debug!("ffprobe command: ffprobe {}", args.join(" "));
+
+    // Execute using FFmpegManager
+    let output_str = ffmpeg_mgr.execute_ffprobe_raw(args).await
+        .with_context(|| format!("Failed to execute ffprobe for: {}", file_path.display()))?;
+
+    // Parse JSON output
+    let data: FFProbeData = serde_json::from_str(&output_str)
         .with_context(|| format!("Failed to parse ffprobe JSON for: {}", file_path.display()))?;
 
     Ok(data)
@@ -178,6 +178,10 @@ impl FFProbeStream {
             if fmt_lower.contains("10") || fmt_lower.contains("p010") {
                 return BitDepth::Bit10;
             }
+            // If we have a pixel format but it's clearly 8-bit
+            if fmt_lower == "yuv420p" || fmt_lower == "yuv422p" || fmt_lower == "yuv444p" {
+                return BitDepth::Bit8;
+            }
         }
         
         // Method 3: Check HDR metadata (implies 10-bit)
@@ -185,8 +189,9 @@ impl FFProbeStream {
             return BitDepth::Bit10;
         }
         
-        // Default to 8-bit if unknown
-        BitDepth::Bit8
+        // If we can't determine bit depth, return Unknown
+        // The quality calculator will default to 10-bit to avoid quality loss
+        BitDepth::Unknown
     }
     
     /// Check if content is HDR (High Dynamic Range)

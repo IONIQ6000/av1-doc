@@ -3451,6 +3451,12 @@ mod tests {
             target_bit_depth: None,
             av1_quality: None,
             av1_profile: None,
+            quality_tier: None,
+            crf_used: None,
+            preset_used: None,
+            encoder_used: None,
+            test_clip_path: None,
+            test_clip_approved: None,
         }
     }
     
@@ -3495,6 +3501,12 @@ mod tests {
                 target_bit_depth: if has_metadata { Some(8) } else { None },
                 av1_quality: Some(25),
                 av1_profile: Some(0),
+                quality_tier: None,
+                crf_used: None,
+                preset_used: None,
+                encoder_used: None,
+                test_clip_path: None,
+                test_clip_approved: None,
             }
         })
     }
