@@ -220,4 +220,381 @@ impl FFProbeStream {
         
         false
     }
+    
+    /// Check if content has Dolby Vision metadata
+    /// Dolby Vision can cause corruption with QSV AV1 encoding and should be stripped
+    pub fn has_dolby_vision(&self) -> bool {
+        // Method 1: Check color transfer for Dolby Vision
+        if let Some(ref transfer) = self.color_transfer {
+            let t = transfer.to_lowercase();
+            // SMPTE ST 2094 is Dolby Vision
+            if t.contains("smpte2094") || t.contains("st2094") {
+                return true;
+            }
+        }
+        
+        // Method 2: Check stream tags for Dolby Vision markers
+        if let Some(ref tags) = self.tags {
+            for (key, value) in tags {
+                let k = key.to_lowercase();
+                let v = value.to_lowercase();
+                
+                // Check for DV in various tag fields
+                if k.contains("dolby") || v.contains("dolby") {
+                    return true;
+                }
+                if k.contains("dovi") || v.contains("dovi") {
+                    return true;
+                }
+                // Check for DVCL/DVHE codec tags
+                if v.contains("dvcl") || v.contains("dvhe") || v.contains("dvh1") {
+                    return true;
+                }
+            }
+        }
+        
+        // Method 3: Check codec name for Dolby Vision
+        if let Some(ref codec) = self.codec_name {
+            let c = codec.to_lowercase();
+            if c.contains("dovi") || c.contains("dolby") {
+                return true;
+            }
+        }
+        
+        false
+    }
+}
+
+impl FFProbeData {
+    /// Check if any video stream has Dolby Vision
+    pub fn has_dolby_vision(&self) -> bool {
+        self.streams.iter()
+            .filter(|s| s.codec_type.as_deref() == Some("video"))
+            .any(|s| s.has_dolby_vision())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Strategy to generate color transfer strings with DV markers
+    fn color_transfer_with_dv() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("smpte2094".to_string()),
+            Just("st2094".to_string()),
+            Just("SMPTE2094".to_string()),
+            Just("ST2094".to_string()),
+            Just("smpte2094-40".to_string()),
+        ]
+    }
+
+    // Strategy to generate color transfer strings without DV markers
+    fn color_transfer_without_dv() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("smpte2084".to_string()),
+            Just("bt709".to_string()),
+            Just("bt2020".to_string()),
+            Just("arib-std-b67".to_string()),
+            Just("linear".to_string()),
+        ]
+    }
+
+    // Strategy to generate tags with DV markers
+    fn tags_with_dv() -> impl Strategy<Value = HashMap<String, String>> {
+        prop_oneof![
+            Just({
+                let mut map = HashMap::new();
+                map.insert("ENCODER".to_string(), "dolby vision".to_string());
+                map
+            }),
+            Just({
+                let mut map = HashMap::new();
+                map.insert("dovi_config".to_string(), "profile5".to_string());
+                map
+            }),
+            Just({
+                let mut map = HashMap::new();
+                map.insert("codec_tag".to_string(), "dvcl".to_string());
+                map
+            }),
+            Just({
+                let mut map = HashMap::new();
+                map.insert("codec_tag".to_string(), "dvhe".to_string());
+                map
+            }),
+            Just({
+                let mut map = HashMap::new();
+                map.insert("codec_tag".to_string(), "dvh1".to_string());
+                map
+            }),
+            Just({
+                let mut map = HashMap::new();
+                map.insert("DOLBY".to_string(), "true".to_string());
+                map
+            }),
+        ]
+    }
+
+    // Strategy to generate tags without DV markers
+    fn tags_without_dv() -> impl Strategy<Value = HashMap<String, String>> {
+        prop_oneof![
+            Just({
+                let mut map = HashMap::new();
+                map.insert("ENCODER".to_string(), "x265".to_string());
+                map
+            }),
+            Just({
+                let mut map = HashMap::new();
+                map.insert("title".to_string(), "Movie".to_string());
+                map
+            }),
+            Just(HashMap::new()),
+        ]
+    }
+
+    // Strategy to generate codec names with DV markers
+    fn codec_name_with_dv() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("dovi".to_string()),
+            Just("dolby_vision".to_string()),
+            Just("hevc_dovi".to_string()),
+            Just("DOVI".to_string()),
+        ]
+    }
+
+    // Strategy to generate codec names without DV markers
+    fn codec_name_without_dv() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("hevc".to_string()),
+            Just("h264".to_string()),
+            Just("av1".to_string()),
+            Just("vp9".to_string()),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// **Feature: dolby-vision-handling, Property 1: Color Transfer Detection**
+        /// **Validates: Requirements 1.1**
+        #[test]
+        fn test_color_transfer_detection(
+            color_transfer in color_transfer_with_dv(),
+        ) {
+            let stream = FFProbeStream {
+                index: 0,
+                codec_type: Some("video".to_string()),
+                codec_name: Some("hevc".to_string()),
+                width: Some(1920),
+                height: Some(1080),
+                avg_frame_rate: Some("24/1".to_string()),
+                r_frame_rate: Some("24/1".to_string()),
+                tags: None,
+                bit_rate: None,
+                disposition: None,
+                pix_fmt: None,
+                bits_per_raw_sample: None,
+                color_transfer: Some(color_transfer.clone()),
+                color_primaries: None,
+                color_space: None,
+            };
+
+            prop_assert!(
+                stream.has_dolby_vision(),
+                "Stream with color_transfer '{}' should be detected as Dolby Vision",
+                color_transfer
+            );
+        }
+
+        /// **Feature: dolby-vision-handling, Property 2: Stream Tag Detection**
+        /// **Validates: Requirements 1.2**
+        #[test]
+        fn test_stream_tag_detection(
+            tags in tags_with_dv(),
+        ) {
+            let stream = FFProbeStream {
+                index: 0,
+                codec_type: Some("video".to_string()),
+                codec_name: Some("hevc".to_string()),
+                width: Some(1920),
+                height: Some(1080),
+                avg_frame_rate: Some("24/1".to_string()),
+                r_frame_rate: Some("24/1".to_string()),
+                tags: Some(tags.clone()),
+                bit_rate: None,
+                disposition: None,
+                pix_fmt: None,
+                bits_per_raw_sample: None,
+                color_transfer: None,
+                color_primaries: None,
+                color_space: None,
+            };
+
+            prop_assert!(
+                stream.has_dolby_vision(),
+                "Stream with tags {:?} should be detected as Dolby Vision",
+                tags
+            );
+        }
+
+        /// **Feature: dolby-vision-handling, Property 3: Codec Name Detection**
+        /// **Validates: Requirements 1.3**
+        #[test]
+        fn test_codec_name_detection(
+            codec_name in codec_name_with_dv(),
+        ) {
+            let stream = FFProbeStream {
+                index: 0,
+                codec_type: Some("video".to_string()),
+                codec_name: Some(codec_name.clone()),
+                width: Some(1920),
+                height: Some(1080),
+                avg_frame_rate: Some("24/1".to_string()),
+                r_frame_rate: Some("24/1".to_string()),
+                tags: None,
+                bit_rate: None,
+                disposition: None,
+                pix_fmt: None,
+                bits_per_raw_sample: None,
+                color_transfer: None,
+                color_primaries: None,
+                color_space: None,
+            };
+
+            prop_assert!(
+                stream.has_dolby_vision(),
+                "Stream with codec_name '{}' should be detected as Dolby Vision",
+                codec_name
+            );
+        }
+
+        /// **Feature: dolby-vision-handling, Property 4: Multi-Stream Detection**
+        /// **Validates: Requirements 1.4**
+        #[test]
+        fn test_multi_stream_detection(
+            dv_stream_index in 0usize..3,
+            color_transfer in color_transfer_with_dv(),
+        ) {
+            // Create multiple video streams, only one with DV
+            let mut streams = vec![];
+            
+            for i in 0..3 {
+                let stream = FFProbeStream {
+                    index: i as i32,
+                    codec_type: Some("video".to_string()),
+                    codec_name: Some("hevc".to_string()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    avg_frame_rate: Some("24/1".to_string()),
+                    r_frame_rate: Some("24/1".to_string()),
+                    tags: None,
+                    bit_rate: None,
+                    disposition: None,
+                    pix_fmt: None,
+                    bits_per_raw_sample: None,
+                    color_transfer: if i == dv_stream_index {
+                        Some(color_transfer.clone())
+                    } else {
+                        Some("bt709".to_string())
+                    },
+                    color_primaries: None,
+                    color_space: None,
+                };
+                streams.push(stream);
+            }
+
+            let data = FFProbeData {
+                streams,
+                format: FFProbeFormat {
+                    format_name: "matroska".to_string(),
+                    bit_rate: None,
+                    tags: None,
+                    muxing_app: None,
+                    writing_library: None,
+                },
+            };
+
+            prop_assert!(
+                data.has_dolby_vision(),
+                "FFProbeData with DV in stream {} should be detected as Dolby Vision",
+                dv_stream_index
+            );
+        }
+
+        /// **Feature: dolby-vision-handling, Property 5: Detection Method Independence**
+        /// **Validates: Requirements 1.5**
+        #[test]
+        fn test_detection_method_independence(
+            detection_method in 0u8..3,
+        ) {
+            let (color_transfer, tags, codec_name) = match detection_method {
+                0 => (Some("smpte2094".to_string()), None, Some("hevc".to_string())),
+                1 => (None, Some({
+                    let mut map = HashMap::new();
+                    map.insert("dovi".to_string(), "true".to_string());
+                    map
+                }), Some("hevc".to_string())),
+                _ => (None, None, Some("dovi".to_string())),
+            };
+
+            let stream = FFProbeStream {
+                index: 0,
+                codec_type: Some("video".to_string()),
+                codec_name,
+                width: Some(1920),
+                height: Some(1080),
+                avg_frame_rate: Some("24/1".to_string()),
+                r_frame_rate: Some("24/1".to_string()),
+                tags,
+                bit_rate: None,
+                disposition: None,
+                pix_fmt: None,
+                bits_per_raw_sample: None,
+                color_transfer,
+                color_primaries: None,
+                color_space: None,
+            };
+
+            prop_assert!(
+                stream.has_dolby_vision(),
+                "Stream with detection method {} should be detected as Dolby Vision",
+                detection_method
+            );
+        }
+
+        /// **Feature: dolby-vision-handling, Property 14: No False Positives**
+        /// **Validates: Requirements 6.4**
+        #[test]
+        fn test_no_false_positives(
+            color_transfer in color_transfer_without_dv(),
+            tags in tags_without_dv(),
+            codec_name in codec_name_without_dv(),
+        ) {
+            let stream = FFProbeStream {
+                index: 0,
+                codec_type: Some("video".to_string()),
+                codec_name: Some(codec_name.clone()),
+                width: Some(1920),
+                height: Some(1080),
+                avg_frame_rate: Some("24/1".to_string()),
+                r_frame_rate: Some("24/1".to_string()),
+                tags: Some(tags.clone()),
+                bit_rate: None,
+                disposition: None,
+                pix_fmt: None,
+                bits_per_raw_sample: None,
+                color_transfer: Some(color_transfer.clone()),
+                color_primaries: None,
+                color_space: None,
+            };
+
+            prop_assert!(
+                !stream.has_dolby_vision(),
+                "Stream without DV markers (color_transfer: '{}', codec_name: '{}', tags: {:?}) should NOT be detected as Dolby Vision",
+                color_transfer, codec_name, tags
+            );
+        }
+    }
 }

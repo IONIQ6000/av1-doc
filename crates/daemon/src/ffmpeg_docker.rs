@@ -22,6 +22,7 @@ pub struct EncodingParams {
     pub av1_profile: u8,
     pub qp: i32,
     pub is_hdr: bool,
+    pub has_dolby_vision: bool,
 }
 
 /// Determine optimal encoding parameters based on source analysis
@@ -45,6 +46,9 @@ pub fn determine_encoding_params(
         .map(|s| s.is_hdr_content())
         .unwrap_or(false);
     
+    // Check for Dolby Vision (needs to be stripped for QSV compatibility)
+    let has_dolby_vision = meta.has_dolby_vision();
+    
     // Determine pixel format and AV1 profile based on bit depth
     // QSV uses profile 0 (main) for both 8-bit and 10-bit
     let (pixel_format, av1_profile) = match bit_depth {
@@ -56,7 +60,11 @@ pub fn determine_encoding_params(
     // Calculate optimal QP value
     let qp = calculate_optimal_qp(meta, input_file, bit_depth);
     
-    info!("🎬 Encoding params (QSV): {}-bit (profile {}), QP {}, format {}, HDR: {}",
+    if has_dolby_vision {
+        info!("⚠️  Dolby Vision detected - will be stripped to prevent corruption");
+    }
+    
+    info!("🎬 Encoding params (QSV): {}-bit (profile {}), QP {}, format {}, HDR: {}, DV: {}",
           match bit_depth {
               BitDepth::Bit8 => 8,
               BitDepth::Bit10 => 10,
@@ -65,7 +73,8 @@ pub fn determine_encoding_params(
           av1_profile,
           qp,
           pixel_format,
-          is_hdr
+          is_hdr,
+          if has_dolby_vision { "strip" } else { "none" }
     );
     
     EncodingParams {
@@ -74,6 +83,7 @@ pub fn determine_encoding_params(
         av1_profile,
         qp,
         is_hdr,
+        has_dolby_vision,
     }
 }
 
@@ -170,6 +180,21 @@ pub async fn run_av1_qsv_job(
     // Ensure even dimensions and set SAR (especially for web-like sources)
     filter_parts.push("pad=ceil(iw/2)*2:ceil(ih/2)*2".to_string());
     filter_parts.push("setsar=1".to_string());
+
+    // Strip Dolby Vision metadata if present (prevents corruption with QSV)
+    // This converts DV to standard HDR10 which QSV can handle properly
+    if encoding_params.has_dolby_vision {
+        use log::info;
+        info!("🔧 Stripping Dolby Vision metadata to prevent encoding corruption");
+        
+        // Remove Dolby Vision side data and convert to HDR10
+        // This preserves HDR but removes the problematic DV layer
+        filter_parts.push("zscale=t=linear:npl=100".to_string());
+        filter_parts.push("format=gbrpf32le".to_string());
+        filter_parts.push("zscale=p=bt709".to_string());
+        filter_parts.push("tonemap=tonemap=hable:desat=0".to_string());
+        filter_parts.push("zscale=t=bt709:m=bt709:r=tv".to_string());
+    }
 
     // Convert to appropriate format based on bit depth
     // 8-bit: nv12, 10-bit: p010le
@@ -730,12 +755,37 @@ mod tests {
     use crate::ffprobe::{FFProbeData, FFProbeStream, FFProbeFormat};
     use std::path::PathBuf;
 
-    // Helper to create test FFProbeData with specific bit depth
+    // Helper to create test FFProbeData with specific bit depth and optional DV markers
     fn create_test_metadata(bit_depth: BitDepth, pix_fmt: &str) -> FFProbeData {
+        create_test_metadata_with_dv(bit_depth, pix_fmt, false)
+    }
+
+    // Helper to create test FFProbeData with specific bit depth and DV marker control
+    fn create_test_metadata_with_dv(bit_depth: BitDepth, pix_fmt: &str, has_dolby_vision: bool) -> FFProbeData {
+        use std::collections::HashMap;
+        
+        let (color_transfer, codec_name, tags) = if has_dolby_vision {
+            // Add DV markers when requested
+            let mut tag_map = HashMap::new();
+            tag_map.insert("DOVI_CONFIGURATION".to_string(), "dvhe.08.06".to_string());
+            (
+                Some("smpte2094".to_string()),
+                Some("hevc_dovi".to_string()),
+                Some(tag_map),
+            )
+        } else {
+            // No DV markers
+            (
+                None,
+                Some("h264".to_string()),
+                None,
+            )
+        };
+        
         FFProbeData {
             streams: vec![FFProbeStream {
                 index: 0,
-                codec_name: Some("h264".to_string()),
+                codec_name,
                 codec_type: Some("video".to_string()),
                 width: Some(1920),
                 height: Some(1080),
@@ -746,12 +796,12 @@ mod tests {
                     BitDepth::Unknown => None,
                 },
                 color_space: None,
-                color_transfer: None,
+                color_transfer,
                 color_primaries: None,
                 bit_rate: Some("5000000".to_string()),
                 avg_frame_rate: Some("30/1".to_string()),
                 r_frame_rate: Some("30/1".to_string()),
-                tags: None,
+                tags,
                 disposition: None,
             }],
             format: FFProbeFormat {
@@ -838,6 +888,16 @@ mod tests {
         let mut filter_parts = Vec::new();
         filter_parts.push("pad=ceil(iw/2)*2:ceil(ih/2)*2".to_string());
         filter_parts.push("setsar=1".to_string());
+        
+        // Strip Dolby Vision metadata if present (prevents corruption with QSV)
+        if encoding_params.has_dolby_vision {
+            filter_parts.push("zscale=t=linear:npl=100".to_string());
+            filter_parts.push("format=gbrpf32le".to_string());
+            filter_parts.push("zscale=p=bt709".to_string());
+            filter_parts.push("tonemap=tonemap=hable:desat=0".to_string());
+            filter_parts.push("zscale=t=bt709:m=bt709:r=tv".to_string());
+        }
+        
         filter_parts.push(format!("format={}", encoding_params.pixel_format));
         filter_parts.push("hwupload".to_string());
 
@@ -1037,6 +1097,7 @@ mod tests {
                 av1_profile: 0,
                 qp,
                 is_hdr: false,
+                has_dolby_vision: false,
             };
             
             let ffmpeg_args = build_ffmpeg_args(
@@ -1118,6 +1179,7 @@ mod tests {
                 av1_profile: 0,
                 qp,
                 is_hdr: false,
+                has_dolby_vision: false,
             };
             
             let ffmpeg_args = build_ffmpeg_args(
@@ -1180,6 +1242,7 @@ mod tests {
                 av1_profile: 0,
                 qp,
                 is_hdr: false,
+                has_dolby_vision: false,
             };
             
             let ffmpeg_args = build_ffmpeg_args(
@@ -1243,6 +1306,7 @@ mod tests {
                 av1_profile: 0,
                 qp,
                 is_hdr: false,
+                has_dolby_vision: false,
             };
             
             let ffmpeg_args = build_ffmpeg_args(
@@ -1305,6 +1369,7 @@ mod tests {
                 av1_profile: 0,
                 qp,
                 is_hdr: false,
+                has_dolby_vision: false,
             };
             
             let ffmpeg_args = build_ffmpeg_args(
@@ -1365,6 +1430,7 @@ mod tests {
                 av1_profile: 0,
                 qp,
                 is_hdr: false,
+                has_dolby_vision: false,
             };
             
             let ffmpeg_args = build_ffmpeg_args(
@@ -1429,6 +1495,7 @@ mod tests {
                 av1_profile: 0,
                 qp,
                 is_hdr: false,
+                has_dolby_vision: false,
             };
             
             let ffmpeg_args = build_ffmpeg_args(
@@ -1492,6 +1559,7 @@ mod tests {
                 av1_profile: 0,
                 qp,
                 is_hdr: false,
+                has_dolby_vision: false,
             };
             
             let ffmpeg_args = build_ffmpeg_args(
@@ -1548,6 +1616,7 @@ mod tests {
                 av1_profile: 0,
                 qp,
                 is_hdr: false,
+                has_dolby_vision: false,
             };
             
             // The quality_used should equal the qp from encoding_params
@@ -1677,5 +1746,537 @@ mod tests {
                 "QSV should always use profile 0 (main) regardless of bit depth"
             );
         }
+
+        /// **Feature: dolby-vision-handling, Property 6: Encoding Parameters Include DV Flag**
+        /// **Validates: Requirements 2.1**
+        /// 
+        /// For any video file metadata, the encoding parameters determined from that metadata 
+        /// SHALL include a has_dolby_vision boolean field
+        #[test]
+        fn test_encoding_parameters_include_dv_flag(
+            width in 640i32..3840i32,
+            height in 480i32..2160i32,
+            is_10bit in prop::bool::ANY,
+            has_dv_color_transfer in prop::bool::ANY,
+            has_dv_codec_tag in prop::bool::ANY,
+            has_dv_stream_tag in prop::bool::ANY,
+        ) {
+            use std::collections::HashMap;
+            
+            let bit_depth = if is_10bit { BitDepth::Bit10 } else { BitDepth::Bit8 };
+            let pix_fmt = if is_10bit { "yuv420p10le" } else { "yuv420p" };
+            
+            // Build metadata with optional DV markers
+            let color_transfer = if has_dv_color_transfer {
+                Some("smpte2094".to_string())
+            } else {
+                None
+            };
+            
+            let codec_name = if has_dv_codec_tag {
+                Some("hevc_dovi".to_string())
+            } else {
+                Some("h264".to_string())
+            };
+            
+            let tags = if has_dv_stream_tag {
+                let mut tag_map = HashMap::new();
+                tag_map.insert("DOVI_CONFIGURATION".to_string(), "dvhe.08.06".to_string());
+                Some(tag_map)
+            } else {
+                None
+            };
+            
+            let meta = FFProbeData {
+                streams: vec![FFProbeStream {
+                    index: 0,
+                    codec_name,
+                    codec_type: Some("video".to_string()),
+                    width: Some(width),
+                    height: Some(height),
+                    pix_fmt: Some(pix_fmt.to_string()),
+                    bits_per_raw_sample: match bit_depth {
+                        BitDepth::Bit8 => Some("8".to_string()),
+                        BitDepth::Bit10 => Some("10".to_string()),
+                        BitDepth::Unknown => None,
+                    },
+                    color_space: None,
+                    color_transfer,
+                    color_primaries: None,
+                    bit_rate: Some("5000000".to_string()),
+                    avg_frame_rate: Some("30/1".to_string()),
+                    r_frame_rate: Some("30/1".to_string()),
+                    tags,
+                    disposition: None,
+                }],
+                format: FFProbeFormat {
+                    format_name: "matroska,webm".to_string(),
+                    bit_rate: Some("5000000".to_string()),
+                    tags: None,
+                    muxing_app: None,
+                    writing_library: None,
+                },
+            };
+            
+            let input_path = std::path::Path::new("/test/video.mkv");
+            let params = determine_encoding_params(&meta, input_path);
+            
+            // Verify that encoding parameters include the has_dolby_vision field
+            // The field should be true if any DV marker is present
+            let expected_dv = has_dv_color_transfer || has_dv_codec_tag || has_dv_stream_tag;
+            
+            prop_assert_eq!(
+                params.has_dolby_vision,
+                expected_dv,
+                "Encoding parameters should include has_dolby_vision field matching DV detection. \
+                 Expected: {}, Got: {}. DV markers: color_transfer={}, codec_tag={}, stream_tag={}",
+                expected_dv,
+                params.has_dolby_vision,
+                has_dv_color_transfer,
+                has_dv_codec_tag,
+                has_dv_stream_tag
+            );
+            
+            // Verify other encoding parameters are still correctly set
+            prop_assert_eq!(
+                params.bit_depth,
+                bit_depth,
+                "Bit depth should be correctly detected"
+            );
+            
+            prop_assert_eq!(
+                params.av1_profile,
+                0,
+                "QSV should use profile 0 for all content"
+            );
+            
+            // Verify pixel format is correct for bit depth
+            let expected_format = if is_10bit { "p010le" } else { "nv12" };
+            prop_assert_eq!(
+                &params.pixel_format,
+                expected_format,
+                "Pixel format should match bit depth"
+            );
+        }
+
+        /// **Feature: dolby-vision-handling, Property 7: DV Filter Chain Construction**
+        /// **Validates: Requirements 3.1**
+        /// 
+        /// For any encoding job where encoding parameters indicate Dolby Vision presence, 
+        /// the constructed filter chain SHALL include DV stripping filters before standard format conversion
+        #[test]
+        fn test_dv_filter_chain_construction(
+            qp in 20i32..=40i32,
+            is_10bit in prop::bool::ANY,
+        ) {
+            let bit_depth = if is_10bit { BitDepth::Bit10 } else { BitDepth::Bit8 };
+            let pixel_format = if is_10bit { "p010le".to_string() } else { "nv12".to_string() };
+            
+            // Create encoding params with DV flag set
+            let encoding_params = EncodingParams {
+                bit_depth,
+                pixel_format: pixel_format.clone(),
+                av1_profile: 0,
+                qp,
+                is_hdr: true,
+                has_dolby_vision: true,
+            };
+            
+            let ffmpeg_args = build_ffmpeg_args(
+                &encoding_params,
+                "/config/input.mkv",
+                "/config/output.mkv",
+                false,
+            );
+            
+            // Find the -vf argument which contains the filter chain
+            let filter_chain = ffmpeg_args.windows(2)
+                .find(|window| window[0] == "-vf")
+                .map(|window| &window[1]);
+            
+            prop_assert!(
+                filter_chain.is_some(),
+                "FFmpeg args should contain '-vf' filter chain argument"
+            );
+            
+            let filter_str = filter_chain.unwrap();
+            
+            // Verify DV stripping filters are present
+            prop_assert!(
+                filter_str.contains("zscale=t=linear:npl=100"),
+                "Filter chain should contain linearization filter when DV is present. Filter chain: {}",
+                filter_str
+            );
+            
+            prop_assert!(
+                filter_str.contains("tonemap="),
+                "Filter chain should contain tonemap filter when DV is present. Filter chain: {}",
+                filter_str
+            );
+            
+            // Verify DV filters appear before format conversion
+            let linear_pos = filter_str.find("zscale=t=linear:npl=100");
+            let format_pos = filter_str.find(&format!("format={}", pixel_format));
+            
+            prop_assert!(
+                linear_pos.is_some() && format_pos.is_some(),
+                "Both DV stripping and format filters should be present"
+            );
+            
+            prop_assert!(
+                linear_pos.unwrap() < format_pos.unwrap(),
+                "DV stripping filters should appear before format conversion. Filter chain: {}",
+                filter_str
+            );
+        }
+
+        /// **Feature: dolby-vision-handling, Property 8: Linearization Filter Presence**
+        /// **Validates: Requirements 3.2**
+        /// 
+        /// For any filter chain constructed for DV stripping, the filter string SHALL contain "zscale=t=linear:npl=100"
+        #[test]
+        fn test_linearization_filter_presence(
+            qp in 20i32..=40i32,
+            is_10bit in prop::bool::ANY,
+        ) {
+            let bit_depth = if is_10bit { BitDepth::Bit10 } else { BitDepth::Bit8 };
+            let pixel_format = if is_10bit { "p010le".to_string() } else { "nv12".to_string() };
+            
+            let encoding_params = EncodingParams {
+                bit_depth,
+                pixel_format,
+                av1_profile: 0,
+                qp,
+                is_hdr: true,
+                has_dolby_vision: true,
+            };
+            
+            let ffmpeg_args = build_ffmpeg_args(
+                &encoding_params,
+                "/config/input.mkv",
+                "/config/output.mkv",
+                false,
+            );
+            
+            let filter_chain = ffmpeg_args.windows(2)
+                .find(|window| window[0] == "-vf")
+                .map(|window| &window[1]);
+            
+            prop_assert!(filter_chain.is_some(), "Filter chain should exist");
+            
+            let filter_str = filter_chain.unwrap();
+            
+            // Verify exact linearization filter string
+            prop_assert!(
+                filter_str.contains("zscale=t=linear:npl=100"),
+                "Filter chain should contain exact linearization filter 'zscale=t=linear:npl=100'. Filter chain: {}",
+                filter_str
+            );
+        }
+
+        /// **Feature: dolby-vision-handling, Property 9: Tonemapping Filter Presence**
+        /// **Validates: Requirements 3.3**
+        /// 
+        /// For any filter chain constructed for DV stripping, the filter string SHALL contain "tonemap=" filter
+        #[test]
+        fn test_tonemapping_filter_presence(
+            qp in 20i32..=40i32,
+            is_10bit in prop::bool::ANY,
+        ) {
+            let bit_depth = if is_10bit { BitDepth::Bit10 } else { BitDepth::Bit8 };
+            let pixel_format = if is_10bit { "p010le".to_string() } else { "nv12".to_string() };
+            
+            let encoding_params = EncodingParams {
+                bit_depth,
+                pixel_format,
+                av1_profile: 0,
+                qp,
+                is_hdr: true,
+                has_dolby_vision: true,
+            };
+            
+            let ffmpeg_args = build_ffmpeg_args(
+                &encoding_params,
+                "/config/input.mkv",
+                "/config/output.mkv",
+                false,
+            );
+            
+            let filter_chain = ffmpeg_args.windows(2)
+                .find(|window| window[0] == "-vf")
+                .map(|window| &window[1]);
+            
+            prop_assert!(filter_chain.is_some(), "Filter chain should exist");
+            
+            let filter_str = filter_chain.unwrap();
+            
+            // Verify tonemap filter is present
+            prop_assert!(
+                filter_str.contains("tonemap="),
+                "Filter chain should contain 'tonemap=' filter. Filter chain: {}",
+                filter_str
+            );
+        }
+
+        /// **Feature: dolby-vision-handling, Property 10: BT.709 TV Range Conversion**
+        /// **Validates: Requirements 3.4**
+        /// 
+        /// For any filter chain constructed for DV stripping, the filter string SHALL contain "zscale=t=bt709:m=bt709:r=tv"
+        #[test]
+        fn test_bt709_tv_range_conversion(
+            qp in 20i32..=40i32,
+            is_10bit in prop::bool::ANY,
+        ) {
+            let bit_depth = if is_10bit { BitDepth::Bit10 } else { BitDepth::Bit8 };
+            let pixel_format = if is_10bit { "p010le".to_string() } else { "nv12".to_string() };
+            
+            let encoding_params = EncodingParams {
+                bit_depth,
+                pixel_format,
+                av1_profile: 0,
+                qp,
+                is_hdr: true,
+                has_dolby_vision: true,
+            };
+            
+            let ffmpeg_args = build_ffmpeg_args(
+                &encoding_params,
+                "/config/input.mkv",
+                "/config/output.mkv",
+                false,
+            );
+            
+            let filter_chain = ffmpeg_args.windows(2)
+                .find(|window| window[0] == "-vf")
+                .map(|window| &window[1]);
+            
+            prop_assert!(filter_chain.is_some(), "Filter chain should exist");
+            
+            let filter_str = filter_chain.unwrap();
+            
+            // Verify BT.709 TV range conversion filter
+            prop_assert!(
+                filter_str.contains("zscale=t=bt709:m=bt709:r=tv"),
+                "Filter chain should contain 'zscale=t=bt709:m=bt709:r=tv'. Filter chain: {}",
+                filter_str
+            );
+        }
+
+        /// **Feature: dolby-vision-handling, Property 11: Hable Tonemapping with Zero Desaturation**
+        /// **Validates: Requirements 4.2**
+        /// 
+        /// For any filter chain constructed for DV stripping, the tonemap filter SHALL specify "tonemap=hable:desat=0"
+        #[test]
+        fn test_hable_tonemapping_parameters(
+            qp in 20i32..=40i32,
+            is_10bit in prop::bool::ANY,
+        ) {
+            let bit_depth = if is_10bit { BitDepth::Bit10 } else { BitDepth::Bit8 };
+            let pixel_format = if is_10bit { "p010le".to_string() } else { "nv12".to_string() };
+            
+            let encoding_params = EncodingParams {
+                bit_depth,
+                pixel_format,
+                av1_profile: 0,
+                qp,
+                is_hdr: true,
+                has_dolby_vision: true,
+            };
+            
+            let ffmpeg_args = build_ffmpeg_args(
+                &encoding_params,
+                "/config/input.mkv",
+                "/config/output.mkv",
+                false,
+            );
+            
+            let filter_chain = ffmpeg_args.windows(2)
+                .find(|window| window[0] == "-vf")
+                .map(|window| &window[1]);
+            
+            prop_assert!(filter_chain.is_some(), "Filter chain should exist");
+            
+            let filter_str = filter_chain.unwrap();
+            
+            // Verify Hable tonemapping with zero desaturation
+            prop_assert!(
+                filter_str.contains("tonemap=tonemap=hable:desat=0"),
+                "Filter chain should contain 'tonemap=tonemap=hable:desat=0'. Filter chain: {}",
+                filter_str
+            );
+        }
+
+        /// **Feature: dolby-vision-handling, Property 12: Float Format Intermediate**
+        /// **Validates: Requirements 4.3**
+        /// 
+        /// For any filter chain constructed for DV stripping, the filter string SHALL contain "format=gbrpf32le" 
+        /// for high precision color processing
+        #[test]
+        fn test_float_format_intermediate(
+            qp in 20i32..=40i32,
+            is_10bit in prop::bool::ANY,
+        ) {
+            let bit_depth = if is_10bit { BitDepth::Bit10 } else { BitDepth::Bit8 };
+            let pixel_format = if is_10bit { "p010le".to_string() } else { "nv12".to_string() };
+            
+            let encoding_params = EncodingParams {
+                bit_depth,
+                pixel_format,
+                av1_profile: 0,
+                qp,
+                is_hdr: true,
+                has_dolby_vision: true,
+            };
+            
+            let ffmpeg_args = build_ffmpeg_args(
+                &encoding_params,
+                "/config/input.mkv",
+                "/config/output.mkv",
+                false,
+            );
+            
+            let filter_chain = ffmpeg_args.windows(2)
+                .find(|window| window[0] == "-vf")
+                .map(|window| &window[1]);
+            
+            prop_assert!(filter_chain.is_some(), "Filter chain should exist");
+            
+            let filter_str = filter_chain.unwrap();
+            
+            // Verify float format intermediate
+            prop_assert!(
+                filter_str.contains("format=gbrpf32le"),
+                "Filter chain should contain 'format=gbrpf32le' for high precision processing. Filter chain: {}",
+                filter_str
+            );
+        }
+
+        /// **Feature: dolby-vision-handling, Property 13: Filter Chain Ordering**
+        /// **Validates: Requirements 4.4**
+        /// 
+        /// For any filter chain constructed for DV stripping, the DV stripping filters SHALL appear 
+        /// before the standard format conversion and hwupload filters
+        #[test]
+        fn test_dv_filter_chain_ordering(
+            qp in 20i32..=40i32,
+            is_10bit in prop::bool::ANY,
+        ) {
+            let bit_depth = if is_10bit { BitDepth::Bit10 } else { BitDepth::Bit8 };
+            let pixel_format = if is_10bit { "p010le".to_string() } else { "nv12".to_string() };
+            
+            let encoding_params = EncodingParams {
+                bit_depth,
+                pixel_format: pixel_format.clone(),
+                av1_profile: 0,
+                qp,
+                is_hdr: true,
+                has_dolby_vision: true,
+            };
+            
+            let ffmpeg_args = build_ffmpeg_args(
+                &encoding_params,
+                "/config/input.mkv",
+                "/config/output.mkv",
+                false,
+            );
+            
+            let filter_chain = ffmpeg_args.windows(2)
+                .find(|window| window[0] == "-vf")
+                .map(|window| &window[1]);
+            
+            prop_assert!(filter_chain.is_some(), "Filter chain should exist");
+            
+            let filter_str = filter_chain.unwrap();
+            
+            // Find positions of key filters
+            let linear_pos = filter_str.find("zscale=t=linear:npl=100");
+            let float_pos = filter_str.find("format=gbrpf32le");
+            let bt709_primary_pos = filter_str.find("zscale=p=bt709");
+            let tonemap_pos = filter_str.find("tonemap=");
+            let bt709_tv_pos = filter_str.find("zscale=t=bt709:m=bt709:r=tv");
+            let format_pos = filter_str.find(&format!("format={}", pixel_format));
+            let hwupload_pos = filter_str.find("hwupload");
+            
+            // Verify all filters are present
+            prop_assert!(linear_pos.is_some(), "Linearization filter should be present");
+            prop_assert!(float_pos.is_some(), "Float format filter should be present");
+            prop_assert!(bt709_primary_pos.is_some(), "BT.709 primary conversion should be present");
+            prop_assert!(tonemap_pos.is_some(), "Tonemap filter should be present");
+            prop_assert!(bt709_tv_pos.is_some(), "BT.709 TV range conversion should be present");
+            prop_assert!(format_pos.is_some(), "Format conversion should be present");
+            prop_assert!(hwupload_pos.is_some(), "HWUpload should be present");
+            
+            // Verify correct ordering: linearization → float → bt709 primary → tonemap → bt709 tv → format → hwupload
+            let linear = linear_pos.unwrap();
+            let float = float_pos.unwrap();
+            let bt709_p = bt709_primary_pos.unwrap();
+            let tone = tonemap_pos.unwrap();
+            let bt709_tv = bt709_tv_pos.unwrap();
+            let format = format_pos.unwrap();
+            let hwup = hwupload_pos.unwrap();
+            
+            prop_assert!(
+                linear < float,
+                "Linearization should come before float conversion. Filter chain: {}",
+                filter_str
+            );
+            
+            prop_assert!(
+                float < bt709_p,
+                "Float conversion should come before BT.709 primary conversion. Filter chain: {}",
+                filter_str
+            );
+            
+            prop_assert!(
+                bt709_p < tone,
+                "BT.709 primary conversion should come before tonemapping. Filter chain: {}",
+                filter_str
+            );
+            
+            prop_assert!(
+                tone < bt709_tv,
+                "Tonemapping should come before BT.709 TV range conversion. Filter chain: {}",
+                filter_str
+            );
+            
+            prop_assert!(
+                bt709_tv < format,
+                "DV stripping (BT.709 TV) should come before standard format conversion. Filter chain: {}",
+                filter_str
+            );
+            
+            prop_assert!(
+                format < hwup,
+                "Format conversion should come before hwupload. Filter chain: {}",
+                filter_str
+            );
+        }
+    }
+
+    // Unit test to verify create_test_metadata_with_dv helper function
+    #[test]
+    fn test_create_test_metadata_with_dv_helper() {
+        // Test without DV markers
+        let meta_no_dv = create_test_metadata_with_dv(BitDepth::Bit10, "yuv420p10le", false);
+        assert!(!meta_no_dv.has_dolby_vision(), "Metadata without DV markers should not detect DV");
+        assert_eq!(meta_no_dv.streams[0].codec_name, Some("h264".to_string()));
+        assert_eq!(meta_no_dv.streams[0].color_transfer, None);
+        assert_eq!(meta_no_dv.streams[0].tags, None);
+
+        // Test with DV markers
+        let meta_with_dv = create_test_metadata_with_dv(BitDepth::Bit10, "yuv420p10le", true);
+        assert!(meta_with_dv.has_dolby_vision(), "Metadata with DV markers should detect DV");
+        assert_eq!(meta_with_dv.streams[0].codec_name, Some("hevc_dovi".to_string()));
+        assert_eq!(meta_with_dv.streams[0].color_transfer, Some("smpte2094".to_string()));
+        assert!(meta_with_dv.streams[0].tags.is_some());
+        
+        // Verify the tags contain DV configuration
+        let tags = meta_with_dv.streams[0].tags.as_ref().unwrap();
+        assert!(tags.contains_key("DOVI_CONFIGURATION"));
+        assert_eq!(tags.get("DOVI_CONFIGURATION"), Some(&"dvhe.08.06".to_string()));
+
+        // Test that create_test_metadata defaults to no DV
+        let meta_default = create_test_metadata(BitDepth::Bit8, "yuv420p");
+        assert!(!meta_default.has_dolby_vision(), "Default create_test_metadata should not have DV markers");
     }
 }

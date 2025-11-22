@@ -3637,7 +3637,7 @@ mod tests {
             filter_choice in 0..5usize,
         ) {
             // Create app with test data
-            let mut app = App::new(PathBuf::from("/tmp/test"));
+            let mut app = App::new(PathBuf::from("/tmp/test"), PathBuf::from("/tmp/test/output"));
             app.jobs = jobs;
             
             // Set filter based on choice
@@ -3700,7 +3700,7 @@ mod tests {
             sort_choice in 0..4usize,
         ) {
             // Create app with test data
-            let mut app = App::new(PathBuf::from("/tmp/test"));
+            let mut app = App::new(PathBuf::from("/tmp/test"), PathBuf::from("/tmp/test/output"));
             app.jobs = jobs;
             
             // Pre-populate estimated savings cache for BySavings sort
@@ -3807,7 +3807,7 @@ mod tests {
             jobs in prop::collection::vec(job_strategy(), 0..50),
         ) {
             // Create app with test data
-            let mut app = App::new(PathBuf::from("/tmp/test"));
+            let mut app = App::new(PathBuf::from("/tmp/test"), PathBuf::from("/tmp/test/output"));
             
             // Set up jobs with actual savings data
             let mut modified_jobs = jobs;
@@ -3873,7 +3873,7 @@ mod tests {
             operations in prop::collection::vec(0..4usize, 0..20),
         ) {
             // Create app with test data
-            let mut app = App::new(PathBuf::from("/tmp/test"));
+            let mut app = App::new(PathBuf::from("/tmp/test"), PathBuf::from("/tmp/test/output"));
             app.jobs = jobs;
             
             // Get filtered job count
@@ -4014,7 +4014,7 @@ mod tests {
             jobs in prop::collection::vec(job_strategy(), 1..10),
         ) {
             // Create app with test data
-            let mut app = App::new(PathBuf::from("/tmp/test"));
+            let mut app = App::new(PathBuf::from("/tmp/test"), PathBuf::from("/tmp/test/output"));
             
             // Create a job with all metadata fields populated
             let mut complete_job = create_test_job("complete_job", JobStatus::Success);
@@ -4540,7 +4540,7 @@ mod tests {
     #[test]
     fn test_full_rendering_pipeline() {
         // Create app with test data
-        let mut app = App::new(PathBuf::from("/tmp/test"));
+        let mut app = App::new(PathBuf::from("/tmp/test"), PathBuf::from("/tmp/test/output"));
         
         // Test 1: Empty job list
         app.jobs = vec![];
@@ -4611,7 +4611,7 @@ mod tests {
     /// Test all keyboard shortcuts and their effects on app state
     #[test]
     fn test_keyboard_shortcuts() {
-        let mut app = App::new(PathBuf::from("/tmp/test"));
+        let mut app = App::new(PathBuf::from("/tmp/test"), PathBuf::from("/tmp/test/output"));
         
         // Create test jobs
         let mut jobs = vec![];
@@ -4717,7 +4717,7 @@ mod tests {
     /// Test state transitions between different view modes and filters
     #[test]
     fn test_state_transitions() {
-        let mut app = App::new(PathBuf::from("/tmp/test"));
+        let mut app = App::new(PathBuf::from("/tmp/test"), PathBuf::from("/tmp/test/output"));
         
         // Create test jobs with various statuses
         let mut jobs = vec![];
@@ -4807,7 +4807,7 @@ mod tests {
     /// Test refresh cycle and data updates
     #[test]
     fn test_refresh_cycle() {
-        let mut app = App::new(PathBuf::from("/tmp/test"));
+        let mut app = App::new(PathBuf::from("/tmp/test"), PathBuf::from("/tmp/test/output"));
         
         // Initial state
         assert_eq!(app.jobs.len(), 0);
