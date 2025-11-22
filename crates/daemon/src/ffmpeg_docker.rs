@@ -46,7 +46,7 @@ pub fn determine_encoding_params(
         .map(|s| s.is_hdr_content())
         .unwrap_or(false);
     
-    // Check for Dolby Vision (needs to be stripped for QSV compatibility)
+    // Check for Dolby Vision (for logging/reporting purposes)
     let has_dolby_vision = meta.has_dolby_vision();
     
     // Determine pixel format and AV1 profile based on bit depth
@@ -61,7 +61,7 @@ pub fn determine_encoding_params(
     let qp = calculate_optimal_qp(meta, input_file, bit_depth);
     
     if has_dolby_vision {
-        info!("⚠️  Dolby Vision detected - will be stripped to prevent corruption");
+        info!("ℹ️  Dolby Vision detected - preserving metadata");
     }
     
     info!("🎬 Encoding params (QSV): {}-bit (profile {}), QP {}, format {}, HDR: {}, DV: {}",
@@ -74,7 +74,7 @@ pub fn determine_encoding_params(
           qp,
           pixel_format,
           is_hdr,
-          if has_dolby_vision { "strip" } else { "none" }
+          if has_dolby_vision { "present" } else { "none" }
     );
     
     EncodingParams {
@@ -180,21 +180,6 @@ pub async fn run_av1_qsv_job(
     // Ensure even dimensions and set SAR (especially for web-like sources)
     filter_parts.push("pad=ceil(iw/2)*2:ceil(ih/2)*2".to_string());
     filter_parts.push("setsar=1".to_string());
-
-    // Strip Dolby Vision metadata if present (prevents corruption with QSV)
-    // This converts DV to standard HDR10 which QSV can handle properly
-    if encoding_params.has_dolby_vision {
-        use log::info;
-        info!("🔧 Stripping Dolby Vision metadata to prevent encoding corruption");
-        
-        // Remove Dolby Vision side data and convert to HDR10
-        // This preserves HDR but removes the problematic DV layer
-        filter_parts.push("zscale=t=linear:npl=100".to_string());
-        filter_parts.push("format=gbrpf32le".to_string());
-        filter_parts.push("zscale=p=bt709".to_string());
-        filter_parts.push("tonemap=tonemap=hable:desat=0".to_string());
-        filter_parts.push("zscale=t=bt709:m=bt709:r=tv".to_string());
-    }
 
     // Convert to appropriate format based on bit depth
     // 8-bit: nv12, 10-bit: p010le
@@ -888,15 +873,6 @@ mod tests {
         let mut filter_parts = Vec::new();
         filter_parts.push("pad=ceil(iw/2)*2:ceil(ih/2)*2".to_string());
         filter_parts.push("setsar=1".to_string());
-        
-        // Strip Dolby Vision metadata if present (prevents corruption with QSV)
-        if encoding_params.has_dolby_vision {
-            filter_parts.push("zscale=t=linear:npl=100".to_string());
-            filter_parts.push("format=gbrpf32le".to_string());
-            filter_parts.push("zscale=p=bt709".to_string());
-            filter_parts.push("tonemap=tonemap=hable:desat=0".to_string());
-            filter_parts.push("zscale=t=bt709:m=bt709:r=tv".to_string());
-        }
         
         filter_parts.push(format!("format={}", encoding_params.pixel_format));
         filter_parts.push("hwupload".to_string());
@@ -1864,7 +1840,9 @@ mod tests {
         /// 
         /// For any encoding job where encoding parameters indicate Dolby Vision presence, 
         /// the constructed filter chain SHALL include DV stripping filters before standard format conversion
+        /// NOTE: DV stripping has been disabled - this test is no longer applicable
         #[test]
+        #[ignore]
         fn test_dv_filter_chain_construction(
             qp in 20i32..=40i32,
             is_10bit in prop::bool::ANY,
@@ -1934,7 +1912,9 @@ mod tests {
         /// **Validates: Requirements 3.2**
         /// 
         /// For any filter chain constructed for DV stripping, the filter string SHALL contain "zscale=t=linear:npl=100"
+        /// NOTE: DV stripping has been disabled - this test is no longer applicable
         #[test]
+        #[ignore]
         fn test_linearization_filter_presence(
             qp in 20i32..=40i32,
             is_10bit in prop::bool::ANY,
@@ -1978,7 +1958,9 @@ mod tests {
         /// **Validates: Requirements 3.3**
         /// 
         /// For any filter chain constructed for DV stripping, the filter string SHALL contain "tonemap=" filter
+        /// NOTE: DV stripping has been disabled - this test is no longer applicable
         #[test]
+        #[ignore]
         fn test_tonemapping_filter_presence(
             qp in 20i32..=40i32,
             is_10bit in prop::bool::ANY,
@@ -2022,7 +2004,9 @@ mod tests {
         /// **Validates: Requirements 3.4**
         /// 
         /// For any filter chain constructed for DV stripping, the filter string SHALL contain "zscale=t=bt709:m=bt709:r=tv"
+        /// NOTE: DV stripping has been disabled - this test is no longer applicable
         #[test]
+        #[ignore]
         fn test_bt709_tv_range_conversion(
             qp in 20i32..=40i32,
             is_10bit in prop::bool::ANY,
@@ -2066,7 +2050,9 @@ mod tests {
         /// **Validates: Requirements 4.2**
         /// 
         /// For any filter chain constructed for DV stripping, the tonemap filter SHALL specify "tonemap=hable:desat=0"
+        /// NOTE: DV stripping has been disabled - this test is no longer applicable
         #[test]
+        #[ignore]
         fn test_hable_tonemapping_parameters(
             qp in 20i32..=40i32,
             is_10bit in prop::bool::ANY,
@@ -2111,7 +2097,9 @@ mod tests {
         /// 
         /// For any filter chain constructed for DV stripping, the filter string SHALL contain "format=gbrpf32le" 
         /// for high precision color processing
+        /// NOTE: DV stripping has been disabled - this test is no longer applicable
         #[test]
+        #[ignore]
         fn test_float_format_intermediate(
             qp in 20i32..=40i32,
             is_10bit in prop::bool::ANY,
@@ -2156,7 +2144,9 @@ mod tests {
         /// 
         /// For any filter chain constructed for DV stripping, the DV stripping filters SHALL appear 
         /// before the standard format conversion and hwupload filters
+        /// NOTE: DV stripping has been disabled - this test is no longer applicable
         #[test]
+        #[ignore]
         fn test_dv_filter_chain_ordering(
             qp in 20i32..=40i32,
             is_10bit in prop::bool::ANY,
