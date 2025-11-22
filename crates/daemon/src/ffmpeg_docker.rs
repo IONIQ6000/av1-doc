@@ -413,29 +413,29 @@ pub fn calculate_optimal_qp(
         if bit_depth == BitDepth::Bit10 { 32 } else { 34 }
     };
     
-    // FIXED: Adjust based on source codec efficiency
-    // Less efficient codecs (H.264) can be compressed more aggressively
-    // More efficient codecs (HEVC, VP9) should preserve quality
+    // Adjust based on source codec efficiency
+    // Note: Codec efficiency matters less than source quality
+    // Even H.264 remuxes deserve quality preservation
     let codec_adjustment = match source_codec.as_str() {
         "h264" | "avc" => {
-            // H.264 is inefficient, AV1 can compress significantly more
-            2 // Higher QP = more compression (CORRECTED)
+            // H.264: AV1 is more efficient, but don't be too aggressive
+            0 // Neutral - let bitrate analysis drive quality decision
         }
         "hevc" | "h265" => {
             // HEVC is already efficient, preserve quality
-            -1 // Lower QP = less compression (CORRECTED)
+            -1 // Lower QP = better quality
         }
         "vp9" => {
             // VP9 is already efficient
-            -1 // Lower QP = less compression
+            -1 // Lower QP = better quality
         }
         "av1" => {
-            // Already AV1 - no change needed
-            0
+            // Already AV1 - preserve quality
+            -2 // Lower QP = better quality
         }
         "mpeg2" | "mpeg2video" => {
-            // MPEG-2 is very inefficient
-            3 // Much more compression possible
+            // MPEG-2 is very inefficient, can compress more
+            1 // Slightly higher QP acceptable
         }
         _ => {
             // Unknown codec - conservative approach
@@ -452,24 +452,24 @@ pub fn calculate_optimal_qp(
         
         debug!("Bitrate efficiency: {:.4} bpppf (bits per pixel per frame)", bits_per_pixel_per_frame);
         
-        // High bitrate (inefficient encoding) = can compress more aggressively
-        // Low bitrate (already efficient) = preserve quality
+        // FIXED: High bitrate = high quality source = PRESERVE quality (lower QP)
+        // Low bitrate = already compressed = can compress more (higher QP)
         if bits_per_pixel_per_frame > 0.6 {
-            // Very high bitrate - compress aggressively
-            qp += 3;
-            debug!("Very high bitrate detected ({:.4} bpppf), increasing QP for more compression", bits_per_pixel_per_frame);
+            // Very high bitrate (Blu-ray remux) - preserve quality
+            qp -= 3;
+            debug!("Very high bitrate detected ({:.4} bpppf), DECREASING QP to preserve quality", bits_per_pixel_per_frame);
         } else if bits_per_pixel_per_frame > 0.4 {
-            // High bitrate - compress more
-            qp += 2;
-            debug!("High bitrate detected ({:.4} bpppf), increasing QP", bits_per_pixel_per_frame);
+            // High bitrate (high-quality source) - preserve quality
+            qp -= 2;
+            debug!("High bitrate detected ({:.4} bpppf), DECREASING QP to preserve quality", bits_per_pixel_per_frame);
         } else if bits_per_pixel_per_frame > 0.2 {
-            // Medium bitrate - moderate compression
-            qp += 1;
-            debug!("Medium bitrate detected ({:.4} bpppf), slight QP increase", bits_per_pixel_per_frame);
-        } else if bits_per_pixel_per_frame < 0.1 {
-            // Very low bitrate - preserve quality
+            // Medium bitrate - moderate quality preservation
             qp -= 1;
-            debug!("Low bitrate detected ({:.4} bpppf), decreasing QP to preserve quality", bits_per_pixel_per_frame);
+            debug!("Medium bitrate detected ({:.4} bpppf), slight QP decrease", bits_per_pixel_per_frame);
+        } else if bits_per_pixel_per_frame < 0.1 {
+            // Very low bitrate (already compressed) - can compress more
+            qp += 1;
+            debug!("Low bitrate detected ({:.4} bpppf), increasing QP (already compressed source)", bits_per_pixel_per_frame);
         }
     }
     
