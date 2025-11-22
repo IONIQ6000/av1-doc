@@ -1424,11 +1424,12 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         
         info!("Job {}: ✓ Copied transcoded file from temp directory", job.id);
         
-        // Delete temp file after successful copy
-        fs::remove_file(&temp_output)
-            .with_context(|| format!("Failed to delete temp file after copy: {}", temp_output.display()))?;
-        
-        info!("Job {}: 🗑️  Deleted temp file from fast storage", job.id);
+        // Delete temp file after successful copy (non-fatal if it fails)
+        if let Err(e) = fs::remove_file(&temp_output) {
+            warn!("Job {}: ⚠️  Failed to delete temp file (non-fatal): {} - {}", job.id, temp_output.display(), e);
+        } else {
+            info!("Job {}: 🗑️  Deleted temp file from fast storage", job.id);
+        }
     } else {
         info!("Job {}: ✓ Moved transcoded file (same filesystem)", job.id);
     }
