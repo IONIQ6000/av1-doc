@@ -1424,11 +1424,35 @@ async fn process_job(cfg: &TranscodeConfig, job: &mut Job) -> Result<()> {
         
         info!("Job {}: ✓ Copied transcoded file from temp directory", job.id);
         
-        // Delete temp file after successful copy (non-fatal if it fails)
-        if let Err(e) = fs::remove_file(&temp_output) {
-            warn!("Job {}: ⚠️  Failed to delete temp file (non-fatal): {} - {}", job.id, temp_output.display(), e);
+        // SAFETY: Triple-check the destination file exists and is valid before deleting temp file
+        // This prevents data loss if the copy was interrupted or incomplete
+        let destination_valid = job.source_path.exists() 
+            && fs::metadata(&job.source_path)
+                .map(|m| m.len() > 1_000_000) // At least 1MB (sanity check)
+                .unwrap_or(false);
+        
+        if !destination_valid {
+            error!("Job {}: ❌ CRITICAL: Destination file missing or too small after copy! Keeping temp file as backup: {}", 
+                   job.id, temp_output.display());
+            // DO NOT delete temp file - it's our only copy!
         } else {
-            info!("Job {}: 🗑️  Deleted temp file from fast storage", job.id);
+            info!("Job {}: ✅ Verified destination file is valid ({} bytes)", 
+                  job.id, fs::metadata(&job.source_path).unwrap().len());
+            
+            // Now safe to delete temp file
+            if temp_output.exists() {
+                match fs::remove_file(&temp_output) {
+                    Ok(_) => {
+                        info!("Job {}: 🗑️  Deleted temp file from fast storage", job.id);
+                    }
+                    Err(e) => {
+                        warn!("Job {}: ⚠️  Failed to delete temp file (non-fatal): {} - {}", 
+                              job.id, temp_output.display(), e);
+                    }
+                }
+            } else {
+                info!("Job {}: ℹ️  Temp file already removed (possibly by another process)", job.id);
+            }
         }
     } else {
         info!("Job {}: ✓ Moved transcoded file (same filesystem)", job.id);
